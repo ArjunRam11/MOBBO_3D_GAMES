@@ -1,0 +1,272 @@
+"""
+Godot Bridge Module
+Sends Global Center of Pressure (GCoP) data to Godot game engine in real-time
+Supports both JSON and binary float32 formats
+"""
+
+import socket
+import json
+import time
+import threading
+import logging
+import struct
+from typing import Optional, Callable
+import numpy as np
+
+logger = logging.getLogger(__name__)
+
+
+class GodotBridge:
+    """Bridge class to send CoP data to Godot game engine via UDP"""
+
+    def __init__(self, godot_ip: str = "127.0.0.1", godot_port: int = 8000,
+                 send_rate: float = 0.02, data_format: str = "binary"):
+        """
+        Initialize Godot Bridge
+
+        Args:
+            godot_ip: IP address where Godot is running (default: localhost)
+            godot_port: UDP port for Godot to receive data (default: 8000)
+            send_rate: Time interval between sends in seconds (default: 0.02 = 50Hz)
+            data_format: "json" or "binary" (default: "binary" for existing NOARK games)
+        """
+        self.godot_ip = godot_ip
+        self.godot_port = godot_port
+        self.send_rate = send_rate
+        self.data_format = data_format  # "json" or "binary"
+
+        # Create UDP socket
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        # Thread control
+        self._running = False
+        self._thread = None
+        self._lock = threading.Lock()
+
+        # Data callback (function to get latest Gcop)
+        self._data_callback: Optional[Callable] = None
+
+        # Statistics
+        self.packets_sent = 0
+        self.last_sent_time = 0
+        self.connection_status = "Disconnected"
+
+        logger.info(f"GodotBridge initialized - Target: {godot_ip}:{godot_port} (format: {data_format})")
+
+    def set_data_callback(self, callback: Callable):
+        """
+        Set callback function to get Gcop data
+
+        Args:
+            callback: Function that returns (gcop_x, gcop_y, gcop_z, total_weight)
+        """
+        with self._lock:
+            self._data_callback = callback
+
+    def start(self):
+        """Start sending data to Godot"""
+        if self._running:
+            logger.warning("GodotBridge already running")
+            return
+
+        self._running = True
+        self._thread = threading.Thread(target=self._send_loop, daemon=True)
+        self._thread.start()
+        self.connection_status = "Connected"
+        logger.info("GodotBridge started")
+
+    def stop(self):
+        """Stop sending data to Godot"""
+        self._running = False
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+        self.connection_status = "Disconnected"
+        logger.info(f"GodotBridge stopped - Total packets sent: {self.packets_sent}")
+
+    def _send_loop(self):
+        """Main loop for sending data to Godot"""
+        while self._running:
+            try:
+                # Get data from callback
+                if self._data_callback:
+                    data = self._data_callback()
+                    if data:
+                        self._send_data(data)
+
+                time.sleep(self.send_rate)
+
+            except Exception as e:
+                logger.error(f"Error in GodotBridge send loop: {e}")
+                time.sleep(0.1)
+
+    def _send_data(self, data: dict):
+        """
+        Send data packet to Godot
+
+        Args:
+            data: Dictionary containing gcop_x, gcop_y, gcop_z, weight, etc.
+        """
+        try:
+            if self.data_format == "json":
+                # JSON format (for new implementations)
+                json_data = json.dumps(data)
+                packet = json_data.encode('utf-8')
+
+            else:  # binary format (for existing NOARK games)
+                # Pack as float32 array: [message_code, x, y, z]
+                # message_code: 2.0 = connected/sending data
+                message_code = 2.0
+                x = float(data.get('x', 0.0))
+                y = float(data.get('y', 0.0))
+                z = float(data.get('z', 0.0))
+
+                # Pack as 4 float32 values (16 bytes total)
+                packet = struct.pack('4f', message_code, x, y, z)
+
+            # Send via UDP
+            self.sock.sendto(packet, (self.godot_ip, self.godot_port))
+
+            # Update statistics
+            self.packets_sent += 1
+            self.last_sent_time = time.time()
+
+            # Log periodically (every 100 packets)
+            if self.packets_sent % 100 == 0:
+                logger.debug(f"Sent packet #{self.packets_sent} to Godot: {data}")
+
+        except Exception as e:
+            logger.error(f"Failed to send data to Godot: {e}")
+
+    def send_single_packet(self, gcop_x: float, gcop_y: float, gcop_z: float = 0.0,
+                          weight: float = 0.0, **kwargs):
+        """
+        Send a single data packet (useful for testing or manual control)
+
+        Args:
+            gcop_x: Global CoP X coordinate
+            gcop_y: Global CoP Y coordinate
+            gcop_z: Global CoP Z coordinate (default: 0)
+            weight: Total weight on sensors
+            **kwargs: Additional data to send
+        """
+        data = {
+            "type": "gcop",
+            "x": float(gcop_x),
+            "y": float(gcop_y),
+            "z": float(gcop_z),
+            "weight": float(weight),
+            "timestamp": time.time(),
+            **kwargs
+        }
+        self._send_data(data)
+
+    def get_status(self) -> dict:
+        """Get bridge status information"""
+        return {
+            "running": self._running,
+            "connection_status": self.connection_status,
+            "godot_ip": self.godot_ip,
+            "godot_port": self.godot_port,
+            "packets_sent": self.packets_sent,
+            "send_rate": self.send_rate,
+            "last_sent": time.time() - self.last_sent_time if self.last_sent_time > 0 else None
+        }
+
+    def __del__(self):
+        """Cleanup on deletion"""
+        self.stop()
+        self.sock.close()
+
+
+class GodotBridgeHelper:
+    """Helper class to integrate GodotBridge with BOSEstimator"""
+
+    def __init__(self, gcop_array, data_lock, godot_ip="127.0.0.1", godot_port=9999,
+                 data_format="binary"):
+        """
+        Initialize helper
+
+        Args:
+            gcop_array: Reference to global gcop1 array
+            data_lock: Threading lock for safe access
+            godot_ip: Godot IP address
+            godot_port: Godot UDP port
+            data_format: "json" or "binary" (default: "binary")
+        """
+        self.gcop_array = gcop_array
+        self.data_lock = data_lock
+        self.total_weight = 0.0
+        self.all_cops = []
+
+        # Create bridge
+        self.bridge = GodotBridge(godot_ip, godot_port, data_format=data_format)
+        self.bridge.set_data_callback(self._get_gcop_data)
+
+    def _get_gcop_data(self) -> Optional[dict]:
+        """Callback to get current Gcop data"""
+        try:
+            with self.data_lock:
+                if self.gcop_array is not None and not np.all(np.isnan(self.gcop_array)):
+                    # Flatten array to ensure 1D access
+                    flat_array = np.array(self.gcop_array).flatten()
+
+                    return {
+                        "type": "gcop",
+                        "x": float(flat_array[0]),
+                        "y": float(flat_array[1]),
+                        "z": float(flat_array[2]),
+                        "weight": float(self.total_weight),
+                        "timestamp": time.time(),
+                        "num_cops": len(self.all_cops)
+                    }
+        except Exception as e:
+            logger.error(f"Error getting Gcop data: {e}")
+        return None
+
+    def update_cop_data(self, all_cops, total_weight):
+        """Update CoP data for transmission"""
+        self.all_cops = all_cops
+        self.total_weight = total_weight
+
+    def start(self):
+        """Start sending to Godot"""
+        self.bridge.start()
+        logger.info("GodotBridgeHelper started")
+
+    def stop(self):
+        """Stop sending to Godot"""
+        self.bridge.stop()
+        logger.info("GodotBridgeHelper stopped")
+
+    def get_status(self):
+        """Get status"""
+        return self.bridge.get_status()
+
+
+if __name__ == "__main__":
+    """Test the Godot Bridge"""
+    logging.basicConfig(level=logging.INFO)
+
+    # Create test bridge
+    bridge = GodotBridge(godot_ip="127.0.0.1", godot_port=8000)
+
+    # Test sending data
+    print("Starting Godot Bridge test...")
+    bridge.start()
+
+    # Simulate sending CoP data for 5 seconds
+    for i in range(50):
+        # Simulate CoP movement in a circle
+        t = i * 0.1
+        x = 0.1 * np.cos(t)
+        y = 0.1 * np.sin(t)
+        z = 0.0
+        weight = 50.0 + 10 * np.sin(t)
+
+        bridge.send_single_packet(x, y, z, weight)
+        print(f"Sent packet {i+1}: x={x:.3f}, y={y:.3f}, weight={weight:.1f}")
+        time.sleep(0.1)
+
+    print("\nBridge Status:", bridge.get_status())
+    bridge.stop()
+    print("Test completed!")

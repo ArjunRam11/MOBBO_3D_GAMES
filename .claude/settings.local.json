@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(\"C:\\Users\\Pintu\\miniconda3\\envs\\mpy11\\python.exe\" main.py)",
+      "Read(//c/Users/Pintu/Downloads/**)",
+      "Bash(timeout:*)",
+      "Bash(git rm:*)",
+      "Bash(git add:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
