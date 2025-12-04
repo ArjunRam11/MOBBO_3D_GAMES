@@ -389,23 +389,16 @@ def plot_rectangle_3d_points (tvec_var, rvec_var,tvec_ref, r_vec_ref, board_poin
     rot_mat_var,_ = cv2.Rodrigues(rvec_var)
     tvec_ref = tvec_ref.reshape(3,1)
     tvec_var = tvec_var.reshape(3,1) 
-
     # relative orientation and translation
-
     relative_rot_mat = np.matmul(np.transpose(rot_mat_ref),rot_mat_var)
-   
     relative_translation_c = tvec_var-tvec_ref
-
-
     # Convert the list of board points to a NumPy array
-
     vertices = np.array(board_points)
     # keypoints_var = np.array(keypoints_var)
 
     # Handle input shape (1, 3) or (23, 3)
     if vertices.ndim == 1:
-        vertices = vertices.reshape(1, 3)
-    
+        vertices = vertices.reshape(1, 3)  
     # *************************Transform the vertices to plot it relatively*************************
     # here the transformation are done to plot the board relatively with respect to the first board it is clear that the points where i click on the graph might not properly match due to the translation and the rotation i peformmed.
     vertices_ = []
@@ -417,17 +410,9 @@ def plot_rectangle_3d_points (tvec_var, rvec_var,tvec_ref, r_vec_ref, board_poin
         np.matmul(np.transpose(rot_mat_ref),relative_translation_c.reshape(3, 1))
  
         vertices_.append(transformed_vertex.flatten())
-
-
-    
     # # Reshape the transformed vertices and take the first two columns (x, y)
-
     vertices_reshaped = np.array(vertices_)
-    
-    
     # Create the rectangle polygon
- 
-    
     return vertices_reshaped
 
     

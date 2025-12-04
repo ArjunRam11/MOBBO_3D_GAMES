@@ -25,7 +25,7 @@ class board_pose_estimator():
         for image_path in self.image_paths:
             image =  image_path
             if image is None:
-                print(f"Error: Unable to load image '{image_path}'")
+                # print(f"Error: Unable to load image '{image_path}'")
                 continue
             
             mean_position = find_high_red_intensity (image, image, self.polygon)

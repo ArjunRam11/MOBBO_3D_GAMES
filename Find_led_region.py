@@ -33,7 +33,7 @@ def find_high_red_intensity(image, image_name, polygon):
     board_rot = polygon['rotation_matrices']
     board_ids = polygon['ids'][0]
 
-    print("the board id ",board_ids)
+    # print("the board id ",board_ids)
     quadrilaterals = convert_to_quadrilaterals(polygon['led_regions'])
 
     # Precompute rotation angles

@@ -52,14 +52,14 @@ def led_glow_up(UDP_IP):
         try:
 
             sock.sendto(bytes([LED_ON]), (UDP_IP, 23000))
-            print(f"LED_ON command sent to {UDP_IP}")
+            # print(f"LED_ON command sent to {UDP_IP}")
 
 
             try:
 
                 data, _ = sock.recvfrom(1024)  # Receive response from the LED device
                 if data == b'ACK':  # Replace with actual acknowledgment response
-                    print(f"LED turned ON confirmed by {UDP_IP}")
+                    # print(f"LED turned ON confirmed by {UDP_IP}")
                     break  # Exit the loop if the LED turned on successfully
             except socket.timeout:
                 print(f"No response from {UDP_IP}, retrying...")
@@ -78,7 +78,7 @@ def led_off_down(UDP_IP):
         try:
 
             sock.sendto(bytes([LED_OFF]), (UDP_IP, 23000))
-            print(f"LED_OFF command sent to {UDP_IP}")
+            # print(f"LED_OFF command sent to {UDP_IP}")
 
 
             try:

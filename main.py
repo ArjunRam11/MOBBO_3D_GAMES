@@ -290,6 +290,7 @@ class ThreadManager:
 
 
 class BOSEstimator:
+    
     """Optimized Base of Support Estimator with improved architecture"""
 
     def __init__(self, frame: Frame_Process):
@@ -348,12 +349,13 @@ class BOSEstimator:
         self.data_lock = threading.Lock()
 
         # Godot Bridge for sending CoP data to game engine
+        # Godot Bridge for sending CoP data to game engine
         self.godot_bridge = GodotBridgeHelper(
             gcop_array=gcop1,
             data_lock=data_lock,
-            godot_ip="127.0.0.1",   # Change to Godot's IP if on different machine
-            godot_port=8000,        # Port 8000 for NOARK games
-            data_format="binary"    # Binary format for existing NOARK games
+            godot_ip="127.0.0.1",
+            godot_port=8000,
+            data_format="json"    # Changed from "binary" to "json"
         )
 
         logger.info("BOSEstimator initialized with optimized architecture")
@@ -383,20 +385,13 @@ class BOSEstimator:
              self.bos_thread.join()
              self.bos_thread_running=False
 
-    
 
     def reset_all_threads(self):
         """Restart BOS processing without stopping all threads."""
         # print("Restarting process...")
-
         self.button=ResetButtonProcess()
         # Start a new worker thread without quitting or closing existing threads
-        self.button.start_worker_thread(self.frame,bos_estimator)
-
-
-
- 
-         
+        self.button.start_worker_thread(self.frame,self)
 
     def thread_process_all(self,frame):
         global process_complete
@@ -405,23 +400,22 @@ class BOSEstimator:
             self.bos_thread = threading.Thread(target=self.compute_BOS)
             self.bos_thread.start()
             self.bos_thread_running=True
-            # print("bos_thread is running")
+            logger.info("BOS thread started")
 
             # Start Godot bridge when BOS processing starts
             print("=" * 60)
             print("🎮 STARTING GODOT BRIDGE - Port 8000")
             print("=" * 60)
             self.godot_bridge.start()
-            logger.info("Godot bridge started - sending CoP data to game")
+            logger.info("Godot bridge started - sending data to game")
             print("✅ Godot bridge started successfully!")
             print("=" * 60)
 
         self.aruco_thread_ = threading.Thread(target=self.run_aruco, args=(self.visualizer,1280, 720, MAT, DIST,frame))
         self.aruco_thread_.start()
-        end_time=time.time
 
         process_complete=True
-        # print("keypoint thread is run")
+        logger.info("All processing threads started")
     
  
 
@@ -431,7 +425,7 @@ class BOSEstimator:
         board_pose_data = self.board_pose.board_pose(frame1)
         self.board_position_data=board_pose_data
         self.mobbo.set_board_data(self.board_position_data)
-        print(board_pose_data)
+        # print(board_pose_data)
         time.sleep(0.5)
 
         self.board_points_3d = {}
@@ -460,7 +454,7 @@ class BOSEstimator:
             rotation_matrices.append(rotation_matrix)
             ip_addresses.append(board_address)
 
-            time.sleep(1)
+            # time.sleep(1  )
 
         distances = [t[2, 0] for t in translations]
         ref_index = np.argmin(distances)  # Closest board as reference
@@ -509,8 +503,29 @@ class BOSEstimator:
             if self.counter==0 and self.visualizer:
                 self.board_pose_mesh_update_graph = BoardMeshPlotter(self.visualizer.view)
                 self.counter += 1
+
             if hasattr(self, 'board_pose_mesh_update_graph'):
                 self.board_pose_mesh_update_graph.update_boards(self.board_points_3d, self.reference_board_id)
+            board_xyz_data = {
+            'reference_id': int(self.reference_board_id),
+            'boards': {}
+        }
+            board_xyz_data['boards'][str(self.reference_board_id)] = {
+            'id': int(self.reference_board_id),
+            'relative_rotation_matrix': np.eye(3).flatten().tolist(),  # Identity matrix
+            'relative_translation': [0.0, 0.0, 0.0]  # Zero translation
+        }
+            # Add relative pose data for each non-reference board
+            for board_id in self.relative_rotations.keys():
+                board_xyz_data['boards'][str(board_id)] = {
+                    'id': int(board_id),
+                    'relative_rotation_matrix': self.relative_rotations[board_id].flatten().tolist(),
+                    'relative_translation': self.relative_translations[board_id].flatten().tolist()
+                }
+
+        # Send to Godot Bridge
+        self.godot_bridge.update_Boardpose_data(board_xyz_data)
+      
 
         global stop_flag_aruco, stop_threads
         stop_flag_aruco = True
@@ -607,10 +622,7 @@ class BOSEstimator:
 
                     if self._send_counter % 100 == 0:
                         gcop_flat = Gcop.flatten()
-                        print(f"📤 Sent #{self._send_counter}: GCoP X={gcop_flat[0]:.4f}, Y={gcop_flat[1]:.4f}, Z={gcop_flat[2]:.4f}, W={total_weight:.2f}")
-
-
-                     
+                        # print(f"📤 Sent #{self._send_counter}: GCoP X={gcop_flat[0]:.4f}, Y={gcop_flat[1]:.4f}, Z={gcop_flat[2]:.4f}, W={total_weight:.2f}")
 
             time.sleep(0.01)
 
@@ -618,53 +630,55 @@ class BOSEstimator:
         self.bos_thread_running = False
 
 
-    def foot_shape_get_numpy_and_scatter_points(self,foot_keys,right_heel,right_toe,left_heel,left_toe):
-            
-            
-            self.left_foot_polygon_point=None
-            self.right_foot_polygon_point=None
-
-            
-            self.foot_numpy_points = [None, None]
-            self.foot_scatter_points = [None, None]
-
-            if foot_keys:
-                # print("the foot graph method is access")
-                from matplotlib.path import Path
-                
-                 
-                if not np.isnan(right_heel).any() and not np.isnan(right_toe).any():
-                    # print("the right inside")
-                    self.right_foot_polygon_point, right_foot = create_foot_polygon_3d(
-                        right_toe, right_heel, 0.27, 0.07, 0.1, 0.020, is_left=False
-                    )
-                    right = True
-                    self.foot_numpy_points[0] = right_foot
-                    self.foot_scatter_points[0] = [right_heel, right_toe]
-                if not np.isnan(left_heel).any() and not np.isnan(left_toe).any():
-                    # print("the left inside")
-                    self.left_foot_polygon_point, left_foot = create_foot_polygon_3d(
-                        left_toe, left_heel, 0.27, 0.07, 0.1, 0.020, is_left=True
-                    )
-                    left = True
-                    self.foot_numpy_points[1] = left_foot
-                    self.foot_scatter_points[1] = [left_heel, left_toe]
-
-                
-                self.mobbo.set_foot_points(
-                     self.foot_numpy_points[1],
-                     self.foot_numpy_points[0]
-                )
-
-                                
-                
-
-
-    
-
+   
+    def foot_shape_get_numpy_and_scatter_points(self, foot_keys, right_heel, right_toe, left_heel, left_toe):
+        """
+        Generate foot polygon points and send BoS data to Godot bridge
+        """
+        self.left_foot_polygon_point = None
+        self.right_foot_polygon_point = None
         
+        self.foot_numpy_points = [None, None]
+        self.foot_scatter_points = [None, None]
 
-           
+        if foot_keys:
+            from matplotlib.path import Path
+            
+            # Process right foot
+            if not np.isnan(right_heel).any() and not np.isnan(right_toe).any():
+                self.right_foot_polygon_point, right_foot = create_foot_polygon_3d(
+                    right_toe, right_heel, 0.27, 0.07, 0.1, 0.020, is_left=False
+                )
+                self.foot_numpy_points[0] = right_foot
+                self.foot_scatter_points[0] = [right_heel, right_toe]
+            
+            # Process left foot
+            if not np.isnan(left_heel).any() and not np.isnan(left_toe).any():
+                self.left_foot_polygon_point, left_foot = create_foot_polygon_3d(
+                    left_toe, left_heel, 0.27, 0.07, 0.1, 0.020, is_left=True
+                )
+                self.foot_numpy_points[1] = left_foot
+                self.foot_scatter_points[1] = [left_heel, left_toe]
+
+            # Set foot points in MOBBO data
+            self.mobbo.set_foot_points(
+                self.foot_numpy_points[1],
+                self.foot_numpy_points[0]
+            )
+
+            # ============================================================
+            # SEND BoS DATA TO GODOT BRIDGE
+            # ============================================================
+            bos_data = {
+                'left_foot': self.foot_numpy_points[1].tolist() if self.foot_numpy_points[1] is not None else None,
+                'right_foot': self.foot_numpy_points[0].tolist() if self.foot_numpy_points[0] is not None else None,
+                # 'left_heel': left_heel.flatten().tolist() if not np.isnan(left_heel).any() else None,
+                # 'left_toe': left_toe.flatten().tolist() if not np.isnan(left_toe).any() else None,
+                # 'right_heel': right_heel.flatten().tolist() if not np.isnan(right_heel).any() else None,
+                # 'right_toe': right_toe.flatten().tolist() if not np.isnan(right_toe).any() else None
+            }
+            self.godot_bridge.update_BoS_data(bos_data)
+      
 
     def run_aruco(self,visualizer, w, h, mat, dist,frame):
 
@@ -772,6 +786,13 @@ class BOSEstimator:
                         keypoint_angle=np.array(keypoint_angle). reshape((8,1))
                         with data_lock:
                             angles[:]=keypoint_angle
+
+                        fbp_data = {
+                        'keypoints_3d': keypoints_from_ref_board.tolist(),
+                        'angles': keypoint_angle.flatten().tolist(),
+                        'timestamp': time.time()
+                    }
+                        self.godot_bridge.update_FBP_data(fbp_data)
                         desired_keypoints = ['head', 'neck', 'right_shoulder', 'left_shoulder',  'right_elbow', 'left_elbow', 'right_hand', 'left_hand', 'right_hip', 'left_hip',
                             'right_knee', 'left_knee', 'right_foot', 'left_foot','left_heel','right_heel','left_foot_index','right_foot_index']
                         if results.pose_landmarks:
@@ -789,6 +810,7 @@ class BOSEstimator:
                         with data_lock:
                             pose_3d_keypoints[:] = keypoints_from_ref_board
                     # print("the image condition is before is work")
+                        # self.godot_bridge.update_FBP_data({'keypoints_3d': None, 'angles': None})
                      
                      
                     if image1 is not None:
@@ -807,18 +829,6 @@ class BOSEstimator:
                 pass
 
             
-         
-        
-  
- 
-
-  
-
- 
-
- 
-
-
 def show_error_message(error_message: str):
     """Display an error message with proper logging and user feedback"""
     logger.error(f"Application error: {error_message}")

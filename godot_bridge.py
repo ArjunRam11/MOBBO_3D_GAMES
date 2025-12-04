@@ -181,8 +181,8 @@ class GodotBridge:
 class GodotBridgeHelper:
     """Helper class to integrate GodotBridge with BOSEstimator"""
 
-    def __init__(self, gcop_array, data_lock, godot_ip="127.0.0.1", godot_port=9999,
-                 data_format="binary"):
+    def __init__(self, gcop_array, data_lock, godot_ip="127.0.0.1", godot_port=8000,
+                 data_format="json"):  # Changed default to "json"
         """
         Initialize helper
 
@@ -191,47 +191,94 @@ class GodotBridgeHelper:
             data_lock: Threading lock for safe access
             godot_ip: Godot IP address
             godot_port: Godot UDP port
-            data_format: "json" or "binary" (default: "binary")
+            data_format: "json" or "binary" (default: "json")
         """
         self.gcop_array = gcop_array
         self.data_lock = data_lock
         self.total_weight = 0.0
         self.all_cops = []
+        
+        # Store all data types
+        self.board_pose_data = None
+        self.bos_data = None
+        self.fbp_data = None
 
         # Create bridge
         self.bridge = GodotBridge(godot_ip, godot_port, data_format=data_format)
-        self.bridge.set_data_callback(self._get_gcop_data)
+        self.bridge.set_data_callback(self._get_all_data)
 
-    def _get_gcop_data(self) -> Optional[dict]:
-        """Callback to get current Gcop data"""
+    def _get_all_data(self) -> Optional[dict]:
+        """Callback to get ALL available data in one JSON packet"""
         try:
             with self.data_lock:
-                if self.gcop_array is not None and not np.all(np.isnan(self.gcop_array)):
-                    # Flatten array to ensure 1D access
+                data = {
+                    "timestamp": time.time()
+                }
+                
+                # Add CoP data (always include, even if NaN)
+                if self.gcop_array is not None:
                     flat_array = np.array(self.gcop_array).flatten()
-
-                    return {
-                        "type": "gcop",
-                        "x": float(flat_array[0]),
-                        "y": float(flat_array[1]),
-                        "z": float(flat_array[2]),
-                        "weight": float(self.total_weight),
-                        "timestamp": time.time(),
-                        "num_cops": len(self.all_cops)
-                    }
+                    if not np.all(np.isnan(flat_array)):
+                        data["cop"] = {
+                            "type": "gcop",
+                            "x": float(flat_array[0]),
+                            "y": float(flat_array[1]),
+                            "z": float(flat_array[2]),
+                            "weight": float(self.total_weight),
+                            "num_cops": len(self.all_cops)
+                        }
+                
+                # Add Board Pose data if available
+                if self.board_pose_data:
+                    data["board_pose"] = self.board_pose_data
+                
+                # Add BoS data if available
+                if self.bos_data:
+                    data["bos"] = self.bos_data
+                
+                # Add FBP data if available
+                if self.fbp_data:
+                    data["fbp"] = self.fbp_data
+                
+                # Only send if we have at least one type of data
+                return data if len(data) > 1 else None  # >1 because timestamp is always there
+                
         except Exception as e:
-            logger.error(f"Error getting Gcop data: {e}")
+            logger.error(f"Error getting data: {e}")
         return None
 
-    def update_cop_data(self, all_cops, total_weight):
+    def update_cop_data(self, gcop_array, total_weight):
         """Update CoP data for transmission"""
-        self.all_cops = all_cops
-        self.total_weight = total_weight
+        with self.data_lock:
+            if gcop_array is not None:
+                self.gcop_array[:] = gcop_array
+            self.total_weight = total_weight
+    
+    def update_Boardpose_data(self, board_xyz):
+        """Update Boardpose data for transmission"""
+        self.board_pose_data = {
+            "type": "board_pose",
+            "data": board_xyz
+        }
+    
+    def update_BoS_data(self, BOS_XYZ):
+        """Update BOS data for transmission"""
+        self.bos_data = {
+            "type": "bos",
+            "data": BOS_XYZ
+        }
+    
+    def update_FBP_data(self, FBP_XYZ):
+        """Update FBP data for transmission"""
+        self.fbp_data = {
+            "type": "fbp",
+            "data": FBP_XYZ
+        }
 
     def start(self):
         """Start sending to Godot"""
         self.bridge.start()
-        logger.info("GodotBridgeHelper started")
+        logger.info("GodotBridgeHelper started - sending JSON data")
 
     def stop(self):
         """Stop sending to Godot"""
@@ -241,6 +288,89 @@ class GodotBridgeHelper:
     def get_status(self):
         """Get status"""
         return self.bridge.get_status()
+
+
+# class GodotBridgeHelper:
+#     """Helper class to integrate GodotBridge with BOSEstimator"""
+
+#     def __init__(self, gcop_array, data_lock, godot_ip="127.0.0.1", godot_port=9999,
+#                  data_format="binary"):
+#         """
+#         Initialize helper
+
+#         Args:
+#             gcop_array: Reference to global gcop1 array
+#             data_lock: Threading lock for safe access
+#             godot_ip: Godot IP address
+#             godot_port: Godot UDP port
+#             data_format: "json" or "binary" (default: "binary")
+#         """
+#         self.gcop_array = gcop_array
+#         self.data_lock = data_lock
+#         self.total_weight = 0.0
+#         self.all_cops = []
+#         self.board_pose_data = None
+#         self.bos_data = None
+#         self.fbp_data = None
+
+
+#         # Create bridge
+#         self.bridge = GodotBridge(godot_ip, godot_port, data_format=data_format)
+#         self.bridge.set_data_callback(self._get_gcop_data)
+
+#     def _get_gcop_data(self) -> Optional[dict]:
+#         """Callback to get current Gcop data"""
+#         try:
+#             with self.data_lock:
+#                 data = {}
+#                 if self.gcop_array is not None and not np.all(np.isnan(self.gcop_array)):
+#                     # Flatten array to ensure 1D access
+#                     flat_array = np.array(self.gcop_array).flatten()
+
+#                     data["cop"] = {
+#                         "x": float(flat_array[0]),
+#                         "y": float(flat_array[1]),
+#                         "z": float(flat_array[2]),
+#                         "weight": float(self.total_weight),
+#                     }
+#                 if self.board_pose_data:
+#                     data["board_pose"] = self.board_pose_data
+#                 if self.bos_data:
+#                     data["bos"] = self.bos_data
+#                 if self.fbp_data:
+#                     data["fbp"] = self.fbp_data
+#                 return data if data else None
+#         except Exception as e:
+#             logger.error(f"Error getting Gcop data: {e}")
+#         return None
+
+#     def update_cop_data(self, all_cops, total_weight):
+#         """Update CoP data for transmission"""
+#         self.all_cops = all_cops
+#         self.total_weight = total_weight
+#     def update_Boardpose_data(self, board_XYZ):
+#         """Update Boardpose data for transmission"""
+#         self.board_XYZ = board_XYZ
+#     def update_BoS_data(self, BOS_XYZ):
+#         """Update BOS data for transmission"""
+#         self.BOS_XYZ = BOS_XYZ
+#     def update_FBP_data(self, FBP_XYZ):
+#         """Update FBP data for transmission"""
+#         self.FBP_XYZ = FBP_XYZ
+
+#     def start(self):
+#         """Start sending to Godot"""
+#         self.bridge.start()
+#         logger.info("GodotBridgeHelper started")
+
+#     def stop(self):
+#         """Stop sending to Godot"""
+#         self.bridge.stop()
+#         logger.info("GodotBridgeHelper stopped")
+
+#     def get_status(self):
+#         """Get status"""
+#         return self.bridge.get_status()
 
 
 if __name__ == "__main__":

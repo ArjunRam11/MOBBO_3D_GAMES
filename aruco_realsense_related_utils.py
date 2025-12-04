@@ -114,7 +114,7 @@ def camera_functions(pipeline,mat,dist):
     cv2.destroyAllWindows()
     camera_end_time=time.time()
     full_time =  camera_end_time- camera_start_time  # Calculate the difference
-    print(f"The camera execution time of the full program: {full_time:.5f} seconds")
+    # print(f"The camera execution time of the full program: {full_time:.5f} seconds")
     return board_setupdata
 
  
@@ -210,9 +210,6 @@ def process_image (image, mat, dist):
                     cv2.aruco.drawDetectedMarkers(image, corners, ids)
 
                 board_setupdata['ids'].append(ids)
-
-                
-    # print(board_setupdata)
 
     
     # cv2.imshow('ArUco Marker Detection', image)

@@ -65,7 +65,7 @@ class ImageCaptureManager:
         pipeline.set_exposure(60, auto_exposure=False) 
         time.sleep(0.5)
         for address in addresses:
-            print(address)
+            # print(address)
             led_glow(address)  # Turn on the LED
             time.sleep(0.5)
             color_frame, depth_frame = pipeline.get_Frames()  # Capture frames
@@ -82,7 +82,7 @@ class ImageCaptureManager:
             led_off(address)  # Turn off the LED
 
         pipeline.set_exposure(0, auto_exposure=True) 
-        print(image_paths)
+        # print(image_paths)
         cv2.destroyAllWindows()
         end_time_captureimage = time.time()
         full_time = end_time_captureimage - start_time_image
