@@ -310,6 +310,8 @@ class BOSEstimator:
 
         # Visualizer reference - will be set later
         self.visualizer = None
+        self.previous_board_pose_hash = None
+        self.board_pose_sent = False
 
         # Foot processing data - pre-allocated for efficiency
         self.foot_vectors = {
@@ -454,7 +456,6 @@ class BOSEstimator:
             rotation_matrices.append(rotation_matrix)
             ip_addresses.append(board_address)
 
-            # time.sleep(1  )
 
         distances = [t[2, 0] for t in translations]
         ref_index = np.argmin(distances)  # Closest board as reference
@@ -506,15 +507,17 @@ class BOSEstimator:
 
             if hasattr(self, 'board_pose_mesh_update_graph'):
                 self.board_pose_mesh_update_graph.update_boards(self.board_points_3d, self.reference_board_id)
+
+
             board_xyz_data = {
             'reference_id': int(self.reference_board_id),
-            'boards': {}
-        }
+            'boards': {}}
+
             board_xyz_data['boards'][str(self.reference_board_id)] = {
             'id': int(self.reference_board_id),
             'relative_rotation_matrix': np.eye(3).flatten().tolist(),  # Identity matrix
-            'relative_translation': [0.0, 0.0, 0.0]  # Zero translation
-        }
+            'relative_translation': [0.0, 0.0, 0.0]}  # Zero translation 
+
             # Add relative pose data for each non-reference board
             for board_id in self.relative_rotations.keys():
                 board_xyz_data['boards'][str(board_id)] = {
@@ -525,6 +528,9 @@ class BOSEstimator:
 
         # Send to Godot Bridge
         self.godot_bridge.update_Boardpose_data(board_xyz_data)
+
+        self.previous_board_pose_hash = self._calculate_board_pose_hash(board_xyz_data)
+        self.board_pose_sent = True
       
 
         global stop_flag_aruco, stop_threads
@@ -532,6 +538,28 @@ class BOSEstimator:
         stop_threads = True
         
         self.thread_process_all(frame1)
+    def _calculate_board_pose_hash(self, board_data: dict) -> int:
+        """
+        Calculate a hash of the board pose data to detect changes.
+        Only considers reference_id and board IDs (not precise positions).
+        """
+        # Create a tuple of board IDs sorted for consistent hashing
+        board_ids = tuple(sorted([int(bid) for bid in board_data['boards'].keys()]))
+        ref_id = board_data['reference_id']
+        
+        # Hash based on which boards are present and which is reference
+        return hash((ref_id, board_ids))
+
+    def _has_board_configuration_changed(self, current_board_data: dict) -> bool:
+        """
+        Check if the board configuration has changed significantly.
+        Returns True if boards were added/removed or reference changed.
+        """
+        if self.previous_board_pose_hash is None:
+            return True
+        
+        current_hash = self._calculate_board_pose_hash(current_board_data)
+        return current_hash != self.previous_board_pose_hash
 
     def compute_BOS(self):
         global stop_flag_aruco, stop_threads
@@ -680,121 +708,163 @@ class BOSEstimator:
             self.godot_bridge.update_BoS_data(bos_data)
       
 
-    def run_aruco(self,visualizer, w, h, mat, dist,frame):
-
+    def run_aruco(self, visualizer, w, h, mat, dist, frame):
         """
-        Function to process ArUco markers and use the data from compute_BOS.
+        Modified run_aruco with board pose change detection
         """
-        frame2=frame
+        frame2 = frame
         
-        ref_rotation_matrix =  self.reference_board_rotation
+        ref_rotation_matrix = self.reference_board_rotation
         ref_translation = self.reference_board_translation
 
-        # print("refence id: ", self.reference_board_id,  "ref_rotation_matrix:",  ref_rotation_matrix  ,  "ref_translation" , ref_translation,  "full_relativerotation :"  , self.board_rotations)
-
-
         self.foot_detection_model.start_detection(frame2)
-        global stop_flag_aruco ,stop_threads
-        while     stop_threads and  stop_flag_aruco:
+        
+        global stop_flag_aruco, stop_threads
+        
+        # Counter for periodic board checking
+        board_check_counter = 0
+        BOARD_CHECK_INTERVAL = 500  # Check every 500 frames (~every 5 seconds at 100fps)
+        
+        while stop_threads and stop_flag_aruco:
             left_heel_vector_ = np.full_like(left_heel_vector, np.nan)
             left_toe_vector_ = np.full_like(left_toe_vector, np.nan)
             right_heel_vector_ = np.full_like(right_heel_vector, np.nan)
             right_toe_vector_ = np.full_like(right_toe_vector, np.nan)
-             
+            
             foot_keys, depth_frame1, image1 = self.foot_detection_model.get_keypoints()
-            # foot_keys, _, _ = self.foot_detection_model.get_keypoints()
-            # image1,depth_frame1=frame2.get_Frames()
-            # foot_keys,_,_ = self.foot_detection_model.get_keypoints()
-            if foot_keys is not None:
 
-                # print("the foot keys is fetch")
+            # ============================================================
+            # PERIODIC BOARD CONFIGURATION CHECK
+            # ============================================================
+            board_check_counter += 1
+            if board_check_counter >= BOARD_CHECK_INTERVAL:
+                board_check_counter = 0
+                
+                # Check if board configuration changed
+                if self.board_pose_sent:
+                    # Rebuild current board data
+                    current_board_data = {
+                        'reference_id': int(self.reference_board_id),
+                        'boards': {}
+                    }
+                    current_board_data['boards'][str(self.reference_board_id)] = {
+                        'id': int(self.reference_board_id),
+                        'relative_rotation_matrix': np.eye(3).flatten().tolist(),
+                        'relative_translation': [0.0, 0.0, 0.0]
+                    }
+                    for board_id in self.relative_rotations.keys():
+                        current_board_data['boards'][str(board_id)] = {
+                            'id': int(board_id),
+                            'relative_rotation_matrix': self.relative_rotations[board_id].flatten().tolist(),
+                            'relative_translation': self.relative_translations[board_id].flatten().tolist()
+                        }
+                    
+                    # Check if changed
+                    if self._has_board_configuration_changed(current_board_data):
+                        print("🔄 Board configuration changed - resending data")
+                        self.godot_bridge.update_Boardpose_data(current_board_data)
+                        self.previous_board_pose_hash = self._calculate_board_pose_hash(current_board_data)
+                        print("✅ Updated board pose data sent to Godot")
+
+            # ============================================================
+            # REST OF THE FOOT AND BODY PROCESSING (unchanged)
+            # ============================================================
+            if foot_keys is not None:
                 def get_3d_point(key):
                     return (
                         get_any_3d_points(foot_keys[key][0], foot_keys[key][1], depth_frame1, MAT)
                         if key in foot_keys
                         else None
                     )
+                
                 right_top_3d = get_3d_point('right_top')
                 right_bottom_3d = get_3d_point('right_bottom')
                 left_top_3d = get_3d_point('left_top')
-                left_bottom_3d = get_3d_point('left_bottom')   
-                 
+                left_bottom_3d = get_3d_point('left_bottom')
 
                 with self.board_point_lock:
-                    # Get all available board IDs dynamically
-                    board_data = self.board_points_3d  # Dictionary containing board IDs as keys and board data as values
+                    board_data = self.board_points_3d
 
                     if not board_data:
                         print("Error: No board points data available!")
                     else:
-                        
-                        # gcop_weight=self.weight
-                        foot_start= True
+                        foot_start = True
 
                         if foot_start:
                             if left_top_3d is not None and left_bottom_3d is not None:
-                                if np.any(left_top_3d) and np.any(left_bottom_3d):  # Ensure arrays have valid data
+                                if np.any(left_top_3d) and np.any(left_bottom_3d):
                                     left_heel_vector_ = return_BOS_vectors_singlekeypoint_pyqt(
-                                        ref_translation, ref_rotation_matrix, ref_translation, ref_rotation_matrix, left_top_3d 
+                                        ref_translation, ref_rotation_matrix, 
+                                        ref_translation, ref_rotation_matrix, left_top_3d
                                     )
                                     left_toe_vector_ = return_BOS_vectors_singlekeypoint_pyqt(
-                                        ref_translation, ref_rotation_matrix, ref_translation, ref_rotation_matrix, left_bottom_3d 
+                                        ref_translation, ref_rotation_matrix, 
+                                        ref_translation, ref_rotation_matrix, left_bottom_3d
                                     )
 
                         if foot_start:
                             if right_top_3d is not None and right_bottom_3d is not None:
-                                if np.any(right_top_3d) and np.any(right_bottom_3d):  # Ensure arrays have valid data
+                                if np.any(right_top_3d) and np.any(right_bottom_3d):
                                     right_heel_vector_ = return_BOS_vectors_singlekeypoint_pyqt(
-                                        ref_translation, ref_rotation_matrix, ref_translation, ref_rotation_matrix, right_top_3d 
+                                        ref_translation, ref_rotation_matrix, 
+                                        ref_translation, ref_rotation_matrix, right_top_3d
                                     )
                                     right_toe_vector_ = return_BOS_vectors_singlekeypoint_pyqt(
-                                        ref_translation, ref_rotation_matrix, ref_translation, ref_rotation_matrix, right_bottom_3d
+                                        ref_translation, ref_rotation_matrix, 
+                                        ref_translation, ref_rotation_matrix, right_bottom_3d
                                     )
- 
 
-            self.foot_shape_get_numpy_and_scatter_points(foot_keys,right_heel_vector_,right_toe_vector_,left_heel_vector_,left_toe_vector_)
+            self.foot_shape_get_numpy_and_scatter_points(
+                foot_keys, right_heel_vector_, right_toe_vector_, 
+                left_heel_vector_, left_toe_vector_
+            )
 
-            # human keypoints
-            key_bool=True
+            # Human keypoints processing (unchanged)
+            key_bool = True
             try:
-                if  key_bool :
-                    # processed_frame = image.copy()
+                if key_bool:
                     processed_frame = image1
+                    results = pose.process(cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB))
                     
-                    results = pose.process(cv2.cvtColor(processed_frame , cv2.COLOR_BGR2RGB))
                     if results.pose_landmarks:
-                        
-
-                        if results.pose_landmarks is None:
-                            print("No pose detected!")
-                            continue
-                        keypoints_3d_dict = get_keypoints_3d_sealibrary(results.pose_landmarks.landmark, depth_frame1, MAT)
-                        keypoints_matrix = np.array([keypoints_3d_dict[k] if keypoints_3d_dict[k] is not None else [None, None, None] for k in keypoints_3d_dict.keys()])
+                        keypoints_3d_dict = get_keypoints_3d_sealibrary(
+                            results.pose_landmarks.landmark, depth_frame1, MAT
+                        )
+                        keypoints_matrix = np.array([
+                            keypoints_3d_dict[k] if keypoints_3d_dict[k] is not None 
+                            else [None, None, None] for k in keypoints_3d_dict.keys()
+                        ])
                         corrected_keypoints = update_buffer(keypoints_matrix)
 
-                        # print("ref roatation :",ref_rotation_matrix  , "ref translation: "  , ref_translation ,  "corrected keypoints:  ", corrected_keypoints )
-                        
-                        keypoints_from_ref_board = return_BOS_vectors_singlekeypoint(ref_translation, ref_rotation_matrix,
-                                        ref_translation, ref_rotation_matrix, corrected_keypoints)
-                        
-                        # print("the human keypoits starting")
+                        keypoints_from_ref_board = return_BOS_vectors_singlekeypoint(
+                            ref_translation, ref_rotation_matrix,
+                            ref_translation, ref_rotation_matrix, corrected_keypoints
+                        )
+
                         with data_lock:
                             pose_3d_keypoints[:] = keypoints_from_ref_board
 
-                        # print("keypoint",  keypoints_from_ref_board)
-                        keypoint_angle=get_all_angles_from_18x3(keypoints_matrix)
-                        keypoint_angle=np.array(keypoint_angle). reshape((8,1))
+                        keypoint_angle = get_all_angles_from_18x3(keypoints_matrix)
+                        keypoint_angle = np.array(keypoint_angle).reshape((8, 1))
+                        
                         with data_lock:
-                            angles[:]=keypoint_angle
+                            angles[:] = keypoint_angle
 
                         fbp_data = {
-                        'keypoints_3d': keypoints_from_ref_board.tolist(),
-                        'angles': keypoint_angle.flatten().tolist(),
-                        'timestamp': time.time()
-                    }
+                            'keypoints_3d': keypoints_from_ref_board.tolist(),
+                            'angles': keypoint_angle.flatten().tolist(),
+                            'timestamp': time.time()
+                        }
                         self.godot_bridge.update_FBP_data(fbp_data)
-                        desired_keypoints = ['head', 'neck', 'right_shoulder', 'left_shoulder',  'right_elbow', 'left_elbow', 'right_hand', 'left_hand', 'right_hip', 'left_hip',
-                            'right_knee', 'left_knee', 'right_foot', 'left_foot','left_heel','right_heel','left_foot_index','right_foot_index']
+
+                        desired_keypoints = [
+                            'head', 'neck', 'right_shoulder', 'left_shoulder',
+                            'right_elbow', 'left_elbow', 'right_hand', 'left_hand',
+                            'right_hip', 'left_hip', 'right_knee', 'left_knee',
+                            'right_foot', 'left_foot', 'left_heel', 'right_heel',
+                            'left_foot_index', 'right_foot_index'
+                        ]
+                        
                         if results.pose_landmarks:
                             for key in desired_keypoints:
                                 landmark_index = keypoints[key]
@@ -802,31 +872,20 @@ class BOSEstimator:
                                 cx = int(landmark.x * image1.shape[1])
                                 cy = int(landmark.y * image1.shape[0])
                                 cv2.circle(image1, (cx, cy), 2, (0, 255, 0), cv2.FILLED)
-                    
                     else:
-                         
-                        keypoints_from_ref_board = np.full((18, 3), np.nan)  # Set all keypoints to NaN
-
+                        keypoints_from_ref_board = np.full((18, 3), np.nan)
                         with data_lock:
                             pose_3d_keypoints[:] = keypoints_from_ref_board
-                    # print("the image condition is before is work")
-                        # self.godot_bridge.update_FBP_data({'keypoints_3d': None, 'angles': None})
-                     
-                     
+
                     if image1 is not None:
-                        # visualizer.latest_frame = image1
-                        # cv2.imshow(image1)
-                        # print("the image is visualizer to update")
                         if self.visualizer:
                             self.visualizer.camera_update(image1)
-                
- 
-      
 
-                else:
-                    time.sleep(0.1)
             except Exception as e:
                 pass
+
+            # Small sleep to prevent excessive CPU usage
+            time.sleep(0.001)
 
             
 def show_error_message(error_message: str):
