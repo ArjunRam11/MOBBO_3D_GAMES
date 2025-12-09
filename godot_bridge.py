@@ -178,116 +178,116 @@ class GodotBridge:
         self.sock.close()
 
 
-class GodotBridgeHelper:
-    """Helper class to integrate GodotBridge with BOSEstimator"""
+# class GodotBridgeHelper:
+#     """Helper class to integrate GodotBridge with BOSEstimator"""
 
-    def __init__(self, gcop_array, data_lock, godot_ip="127.0.0.1", godot_port=8000,
-                 data_format="json"):  # Changed default to "json"
-        """
-        Initialize helper
+#     def __init__(self, gcop_array, data_lock, godot_ip="127.0.0.1", godot_port=8000,
+#                  data_format="json"):  # Changed default to "json"
+#         """
+#         Initialize helper
 
-        Args:
-            gcop_array: Reference to global gcop1 array
-            data_lock: Threading lock for safe access
-            godot_ip: Godot IP address
-            godot_port: Godot UDP port
-            data_format: "json" or "binary" (default: "json")
-        """
-        self.gcop_array = gcop_array
-        self.data_lock = data_lock
-        self.total_weight = 0.0
-        self.all_cops = []
+#         Args:
+#             gcop_array: Reference to global gcop1 array
+#             data_lock: Threading lock for safe access
+#             godot_ip: Godot IP address
+#             godot_port: Godot UDP port
+#             data_format: "json" or "binary" (default: "json")
+#         """
+#         self.gcop_array = gcop_array
+#         self.data_lock = data_lock
+#         self.total_weight = 0.0
+#         self.all_cops = []
         
-        # Store all data types
-        self.board_pose_data = None
-        self.bos_data = None
-        self.fbp_data = None
+#         # Store all data types
+#         self.board_pose_data = None
+#         self.bos_data = None
+#         self.fbp_data = None
 
-        # Create bridge
-        self.bridge = GodotBridge(godot_ip, godot_port, data_format=data_format)
-        self.bridge.set_data_callback(self._get_all_data)
+#         # Create bridge
+#         self.bridge = GodotBridge(godot_ip, godot_port, data_format=data_format)
+#         self.bridge.set_data_callback(self._get_all_data)
 
-    def _get_all_data(self) -> Optional[dict]:
-        """Callback to get ALL available data in one JSON packet"""
-        try:
-            with self.data_lock:
-                data = {
-                    "timestamp": time.time()
-                }
+#     def _get_all_data(self) -> Optional[dict]:
+#         """Callback to get ALL available data in one JSON packet"""
+#         try:
+#             with self.data_lock:
+#                 data = {
+#                     "timestamp": time.time()
+#                 }
                 
-                # Add CoP data (always include, even if NaN)
-                if self.gcop_array is not None:
-                    flat_array = np.array(self.gcop_array).flatten()
-                    if not np.all(np.isnan(flat_array)):
-                        data["cop"] = {
-                            "type": "gcop",
-                            "x": float(flat_array[0]),
-                            "y": float(flat_array[1]),
-                            "z": float(flat_array[2]),
-                            "weight": float(self.total_weight),
-                            "num_cops": len(self.all_cops)
-                        }
+#                 # Add CoP data (always include, even if NaN)
+#                 if self.gcop_array is not None:
+#                     flat_array = np.array(self.gcop_array).flatten()
+#                     if not np.all(np.isnan(flat_array)):
+#                         data["cop"] = {
+#                             "type": "gcop",
+#                             "x": float(flat_array[0]),
+#                             "y": float(flat_array[1]),
+#                             "z": float(flat_array[2]),
+#                             "weight": float(self.total_weight),
+#                             "num_cops": len(self.all_cops)
+#                         }
                 
-                # Add Board Pose data if available
-                if self.board_pose_data:
-                    data["board_pose"] = self.board_pose_data
+#                 # Add Board Pose data if available
+#                 if self.board_pose_data:
+#                     data["board_pose"] = self.board_pose_data
                 
-                # Add BoS data if available
-                if self.bos_data:
-                    data["bos"] = self.bos_data
+#                 # Add BoS data if available
+#                 if self.bos_data:
+#                     data["bos"] = self.bos_data
                 
-                # Add FBP data if available
-                if self.fbp_data:
-                    data["fbp"] = self.fbp_data
+#                 # Add FBP data if available
+#                 if self.fbp_data:
+#                     data["fbp"] = self.fbp_data
                 
-                # Only send if we have at least one type of data
-                return data if len(data) > 1 else None  # >1 because timestamp is always there
+#                 # Only send if we have at least one type of data
+#                 return data if len(data) > 1 else None  # >1 because timestamp is always there
                 
-        except Exception as e:
-            logger.error(f"Error getting data: {e}")
-        return None
+#         except Exception as e:
+#             logger.error(f"Error getting data: {e}")
+#         return None
 
-    def update_cop_data(self, gcop_array, total_weight):
-        """Update CoP data for transmission"""
-        with self.data_lock:
-            if gcop_array is not None:
-                self.gcop_array[:] = gcop_array
-            self.total_weight = total_weight
+#     def update_cop_data(self, gcop_array, total_weight):
+#         """Update CoP data for transmission"""
+#         with self.data_lock:
+#             if gcop_array is not None:
+#                 self.gcop_array[:] = gcop_array
+#             self.total_weight = total_weight
     
-    def update_Boardpose_data(self, board_xyz):
-        """Update Boardpose data for transmission"""
-        self.board_pose_data = {
-            "type": "board_pose",
-            "data": board_xyz
-        }
+#     def update_Boardpose_data(self, board_xyz):
+#         """Update Boardpose data for transmission"""
+#         self.board_pose_data = {
+#             "type": "board_pose",
+#             "data": board_xyz
+#         }
     
-    def update_BoS_data(self, BOS_XYZ):
-        """Update BOS data for transmission"""
-        self.bos_data = {
-            "type": "bos",
-            "data": BOS_XYZ
-        }
+#     def update_BoS_data(self, BOS_XYZ):
+#         """Update BOS data for transmission"""
+#         self.bos_data = {
+#             "type": "bos",
+#             "data": BOS_XYZ
+#         }
     
-    def update_FBP_data(self, FBP_XYZ):
-        """Update FBP data for transmission"""
-        self.fbp_data = {
-            "type": "fbp",
-            "data": FBP_XYZ
-        }
+#     def update_FBP_data(self, FBP_XYZ):
+#         """Update FBP data for transmission"""
+#         self.fbp_data = {
+#             "type": "fbp",
+#             "data": FBP_XYZ
+#         }
 
-    def start(self):
-        """Start sending to Godot"""
-        self.bridge.start()
-        logger.info("GodotBridgeHelper started - sending JSON data")
+#     def start(self):
+#         """Start sending to Godot"""
+#         self.bridge.start()
+#         logger.info("GodotBridgeHelper started - sending JSON data")
 
-    def stop(self):
-        """Stop sending to Godot"""
-        self.bridge.stop()
-        logger.info("GodotBridgeHelper stopped")
+#     def stop(self):
+#         """Stop sending to Godot"""
+#         self.bridge.stop()
+#         logger.info("GodotBridgeHelper stopped")
 
-    def get_status(self):
-        """Get status"""
-        return self.bridge.get_status()
+#     def get_status(self):
+#         """Get status"""
+#         return self.bridge.get_status()
 
 
 # class GodotBridgeHelper:
@@ -371,6 +371,177 @@ class GodotBridgeHelper:
 #     def get_status(self):
 #         """Get status"""
 #         return self.bridge.get_status()
+"""
+Updated GodotBridgeHelper with optimized board pose sending
+Only sends board pose initially and when configuration changes
+"""
+
+class GodotBridgeHelper:
+    """Helper class to integrate GodotBridge with BOSEstimator"""
+
+    def __init__(self, gcop_array, data_lock, godot_ip="127.0.0.1", godot_port=8000,
+                 data_format="json"):
+        """
+        Initialize helper
+
+        Args:
+            gcop_array: Reference to global gcop1 array
+            data_lock: Threading lock for safe access
+            godot_ip: Godot IP address
+            godot_port: Godot UDP port
+            data_format: "json" or "binary" (default: "json")
+        """
+        self.gcop_array = gcop_array
+        self.data_lock = data_lock
+        self.total_weight = 0.0
+        
+        # Store local CoPs and global CoP separately
+        self.local_cops = []  # List of local CoP dictionaries
+        self.gcop = None      # Global CoP dictionary
+        
+        # Store all other data types
+        self.board_pose_data = None
+        self.bos_data = None
+        self.fbp_data = None
+        
+        # Board pose change tracking
+        self.board_pose_sent = False
+        self.previous_board_pose_hash = None
+        self.send_board_pose_next = False
+
+        # Create bridge
+        self.bridge = GodotBridge(godot_ip, godot_port, data_format=data_format)
+        self.bridge.set_data_callback(self._get_all_data)
+
+    def _calculate_board_pose_hash(self, board_data: dict) -> int:
+        """Calculate a hash of the board pose data to detect changes."""
+        if not board_data:
+            return 0
+        
+        boards = board_data.get('data', {}).get('boards', {})
+        board_ids = tuple(sorted([int(bid) for bid in boards.keys()]))
+        ref_id = board_data.get('data', {}).get('reference_id', -1)
+        
+        return hash((ref_id, board_ids))
+
+    def _get_all_data(self) -> Optional[dict]:
+        """Callback to get ALL available data in one JSON packet"""
+        try:
+            with self.data_lock:
+                data = {
+                    "timestamp": time.time()
+                }
+                
+                # Add CoP data (both local and global)
+                if self.local_cops or self.gcop:
+                    cop_data = {}
+                    
+                    # Add local CoPs if available
+                    if self.local_cops:
+                        cop_data["local_cops"] = self.local_cops
+                    
+                    # Add global CoP if available
+                    if self.gcop:
+                        cop_data["gcop"] = self.gcop
+                    
+                    if cop_data:
+                        data["cop"] = cop_data
+                
+                # Add Board Pose data ONLY if flagged to send
+                if self.send_board_pose_next and self.board_pose_data:
+                    data["board_pose"] = self.board_pose_data
+                    self.send_board_pose_next = False
+                    logger.info("📤 Sending board pose data to Godot")
+                
+                # Add BoS data if available
+                if self.bos_data:
+                    data["bos"] = self.bos_data
+                
+                # Add FBP data if available
+                if self.fbp_data:
+                    data["fbp"] = self.fbp_data
+                
+                # Only send if we have at least one type of data
+                return data if len(data) > 1 else None
+                
+        except Exception as e:
+            logger.error(f"Error getting data: {e}")
+        return None
+
+    def update_cop_data(self, local_cops: list, gcop: dict, total_weight: float):
+        """
+        Update CoP data for transmission (both local and global)
+        
+        Args:
+            local_cops: List of local CoP dictionaries [{'x': ..., 'y': ..., 'z': ..., 'weight': ...}, ...]
+            gcop: Global CoP dictionary {'x': ..., 'y': ..., 'z': ..., 'weight': ...}
+            total_weight: Total weight across all sensors
+        """
+        with self.data_lock:
+            self.local_cops = local_cops if local_cops else []
+            self.gcop = gcop if gcop else None
+            self.total_weight = total_weight
+    
+    def update_Boardpose_data(self, board_xyz):
+        """
+        Update Board pose data for transmission.
+        Only flags for sending if:
+        1. First time (never sent before)
+        2. Board configuration changed
+        """
+        new_board_data = {
+            "type": "board_pose",
+            "data": board_xyz
+        }
+        new_hash = self._calculate_board_pose_hash(new_board_data)
+        
+        should_send = False
+        
+        if not self.board_pose_sent:
+            should_send = True
+            logger.info("🆕 First board pose data - flagging for send")
+        elif new_hash != self.previous_board_pose_hash:
+            should_send = True
+            logger.info("🔄 Board configuration changed - flagging for send")
+        
+        if should_send:
+            self.board_pose_data = new_board_data
+            self.send_board_pose_next = True
+            self.previous_board_pose_hash = new_hash
+            self.board_pose_sent = True
+    
+    def update_BoS_data(self, BOS_XYZ):
+        """Update BOS data for transmission"""
+        self.bos_data = {
+            "type": "bos",
+            "data": BOS_XYZ
+        }
+    
+    def update_FBP_data(self, FBP_XYZ):
+        """Update FBP data for transmission"""
+        self.fbp_data = {
+            "type": "fbp",
+            "data": FBP_XYZ
+        }
+
+    def start(self):
+        """Start sending to Godot"""
+        self.bridge.start()
+        logger.info("GodotBridgeHelper started - sending JSON data with local CoPs and GCoP")
+
+    def stop(self):
+        """Stop sending to Godot"""
+        self.bridge.stop()
+        logger.info("GodotBridgeHelper stopped")
+
+    def get_status(self):
+        """Get status"""
+        status = self.bridge.get_status()
+        status['board_pose_sent'] = self.board_pose_sent
+        status['board_pose_hash'] = self.previous_board_pose_hash
+        status['local_cops_count'] = len(self.local_cops)
+        status['has_gcop'] = self.gcop is not None
+        return status
 
 
 if __name__ == "__main__":

@@ -20,6 +20,9 @@ from dataclasses import dataclass, field
 from contextlib import contextmanager
 
 import numpy as np
+np.set_printoptions(precision=3, suppress=True)
+
+import math
 import cv2
 from PyQt5 import QtWidgets, QtCore
 
@@ -50,6 +53,84 @@ from COP_wifi_data import MobboData
 from godot_bridge import GodotBridgeHelper
 
 
+
+def sanitize_for_json(data):
+    """
+    Recursively sanitize data for JSON serialization by replacing NaN/inf values with None.
+    Also filters out arrays/points that are entirely None/NaN.
+    
+    Args:
+        data: Any data structure (dict, list, numpy array, scalar)
+        
+    Returns:
+        Sanitized data structure safe for JSON serialization
+    """
+    if isinstance(data, dict):
+        return {k: sanitize_for_json(v) for k, v in data.items()}
+    
+    elif isinstance(data, (list, tuple)):
+        sanitized = [sanitize_for_json(item) for item in data]
+        # Check if all elements are None
+        if all(x is None for x in sanitized):
+            return None
+        return sanitized
+    
+    elif isinstance(data, np.ndarray):
+        # Check if array contains all NaN/invalid values
+        if np.all(np.isnan(data)) or data.size == 0:
+            return None
+        # Convert numpy array to list and sanitize each element
+        return sanitize_for_json(data.tolist())
+    
+    elif isinstance(data, (np.floating, float)):
+        # Replace NaN and inf with None
+        if math.isnan(data) or math.isinf(data):
+            return None
+        return float(data)
+    
+    elif isinstance(data, (np.integer, int)):
+        return int(data)
+    
+    elif data is None:
+        return None
+    
+    else:
+        # For other types, try to return as-is
+        return data
+
+
+def validate_polygon_data(polygon_data):
+    """
+    Validate polygon data to ensure it has valid points.
+    Returns None if polygon is invalid, otherwise returns cleaned data.
+    
+    Args:
+        polygon_data: Array of [x, y, z] points
+        
+    Returns:
+        Cleaned polygon data or None if invalid
+    """
+    if polygon_data is None:
+        return None
+    
+    if isinstance(polygon_data, np.ndarray):
+        # Check if array is empty or all NaN
+        if polygon_data.size == 0 or np.all(np.isnan(polygon_data)):
+            return None
+        
+        # Filter out rows with any NaN values
+        valid_rows = []
+        for row in polygon_data:
+            if len(row) >= 3 and not np.isnan(row).any():
+                valid_rows.append([float(row[0]), float(row[1]), float(row[2])])
+        
+        # Need at least 3 points for a valid polygon
+        if len(valid_rows) < 3:
+            return None
+        
+        return valid_rows
+    
+    return None
 # Configuration constants
 CONFIG = {
     'SLEEP_INTERVALS': {
@@ -399,7 +480,7 @@ class BOSEstimator:
         global process_complete
 
         if not self.bos_thread_running :
-            self.bos_thread = threading.Thread(target=self.compute_BOS)
+            self.bos_thread = threading.Thread(target=self.compute_COP)
             self.bos_thread.start()
             self.bos_thread_running=True
             logger.info("BOS thread started")
@@ -418,9 +499,10 @@ class BOSEstimator:
 
         process_complete=True
         logger.info("All processing threads started")
+
+  
     
  
-
     def board_pose_detected_set(self, frame):
         
         frame1 = frame
@@ -561,7 +643,7 @@ class BOSEstimator:
         current_hash = self._calculate_board_pose_hash(current_board_data)
         return current_hash != self.previous_board_pose_hash
 
-    def compute_BOS(self):
+    def compute_COP(self):
         global stop_flag_aruco, stop_threads
 
         while stop_threads and stop_flag_aruco:
@@ -571,18 +653,12 @@ class BOSEstimator:
                 if len(addr_keys) >= 2:
                     total_weighted_cop = np.zeros((3, 1))
                     total_weight = 0
-                    self.all_cops  = []   
-
-                    cop1_transformed = None   
-                    cop2_transformed = None   
-                    weight_1 = None
-                    weight_2 = None
-                     
+                    self.all_cops = []   
 
                     # Iterate through all available CoPs
                     for addr in addr_keys:
                         copx, copy, w = self.mobbo.cop_data[addr]
-                        weight=w
+                        weight = w
                         cop = np.array([copx, copy, 0]).reshape(3, 1)
 
                         # Apply 180-degree rotation
@@ -592,69 +668,90 @@ class BOSEstimator:
                         board_ip = str(addr[0]).strip().lower()
                         self.reference_board_ip = str(self.reference_board_ip).strip().lower()
 
-                         
-
                         if board_ip == self.reference_board_ip:  
-                            # This is the reference board → store its transformed CoP
-                            
-                            cop1_transformed = cop_transformed
-                            weight_1 = w
-                            self.all_cops.append((cop1_transformed, w))
-                             
-                            
-
+                            # This is the reference board
+                            self.all_cops.append((cop_transformed, w))
                         else:  
-                            # This is NOT the reference board → Apply additional transformations if available
-                            
-                            board_id_get = next((k for k, v in self.board_ip.items() if str(v).strip().lower()== board_ip), None)
+                            # This is NOT the reference board → Apply additional transformations
+                            board_id_get = next((k for k, v in self.board_ip.items() 
+                                            if str(v).strip().lower() == board_ip), None)
 
-                             
-                            cop_transformed = np.matmul(self.relative_rotations[board_id_get], cop_transformed)
-                            cop_transformed += self.relative_translations[board_id_get]
+                            if board_id_get and board_id_get in self.relative_rotations:
+                                cop_transformed = np.matmul(
+                                    self.relative_rotations[board_id_get], cop_transformed
+                                )
+                                cop_transformed += self.relative_translations[board_id_get]
 
-                            self.all_cops.append((cop_transformed, w))  
-                            reference_found = False
+                            self.all_cops.append((cop_transformed, w))
 
                         # Compute total weighted CoP
                         total_weighted_cop += w * cop_transformed
                         total_weight += w
 
-                    # Sort non-reference CoPs by weight (descending order)
+                    # Sort CoPs by weight (descending order)
                     self.all_cops.sort(key=lambda x: x[1], reverse=True)
-                    self.weight=total_weight
                     
-                    
-                    
-                    self.weight_1 = weight_1
-                    self.weight_2 = weight_2
-
                     # Compute final global CoP
                     Gcop = total_weighted_cop / total_weight if total_weight != 0 else np.zeros((3, 1))
+                    
+                    # Update visualizer
                     if self.visualizer:
                         self.visualizer.cop_and_gcop_update(self.all_cops, total_weight)
-                    # # Update shared data under lock
+                    
+                    # Update shared data under lock
                     with data_lock:
-
                         if gcop1 is not None:
                             gcop1[:] = Gcop.flatten()
 
-                    # print(self.all_cops)
-                    # Send Gcop data to Godot (always send, even if zero for testing)
-                    self.godot_bridge.update_cop_data(Gcop.flatten(), total_weight)
+                    # ============================================================
+                    # SEND LOCAL CoPs AND GLOBAL CoP TO GODOT BRIDGE
+                    # ============================================================
+                    
+                    # Prepare local CoPs data (sanitized)
+                    local_cops_data = []
+                    for cop_vec, cop_weight in self.all_cops:
+                        cop_flat = cop_vec.flatten()
+                        local_cop = {
+                            'x': sanitize_for_json(cop_flat[0]),
+                            'y': sanitize_for_json(cop_flat[1]),
+                            'z': sanitize_for_json(cop_flat[2]),
+                            'weight': sanitize_for_json(cop_weight)
+                        }
+                        # Only add if not all None
+                        if not all(v is None for v in local_cop.values()):
+                            local_cops_data.append(local_cop)
+                    
+                    # Prepare global CoP data (sanitized)
+                    gcop_flat = Gcop.flatten()
+                    gcop_data = {
+                        'x': sanitize_for_json(gcop_flat[0]),
+                        'y': sanitize_for_json(gcop_flat[1]),
+                        'z': sanitize_for_json(gcop_flat[2]),
+                        'weight': sanitize_for_json(total_weight)
+                    }
+                    
+                    # Send to Godot Bridge
+                    self.godot_bridge.update_cop_data(
+                        local_cops=local_cops_data,
+                        gcop=gcop_data,
+                        total_weight=total_weight
+                    )
 
                     # Debug: Print every 100 loops to verify sending
-                    if hasattr(self, '_send_counter'):
-                        self._send_counter += 1
-                    else:
-                        self._send_counter = 1
+                    # if hasattr(self, '_send_counter'):
+                    #     self._send_counter += 1
+                    # else:
+                    #     self._send_counter = 1
 
-                    if self._send_counter % 100 == 0:
-                        gcop_flat = Gcop.flatten()
-                        # print(f"📤 Sent #{self._send_counter}: GCoP X={gcop_flat[0]:.4f}, Y={gcop_flat[1]:.4f}, Z={gcop_flat[2]:.4f}, W={total_weight:.2f}")
+                    # if self._send_counter % 100 == 0:
+                    #     print(f"📤 Sent #{self._send_counter}: "
+                    #         f"Local CoPs={len(local_cops_data)}, "
+                    #         f"GCoP X={gcop_data['x']:.4f if gcop_data['x'] else 'None'}, "
+                    #         f"Y={gcop_data['y']:.4f if gcop_data['y'] else 'None'}, "
+                    #         f"W={total_weight:.2f}")
 
             time.sleep(0.01)
 
-        # print("compute_BOS thread has exited")
         self.bos_thread_running = False
 
 
@@ -695,18 +792,27 @@ class BOSEstimator:
             )
 
             # ============================================================
-            # SEND BoS DATA TO GODOT BRIDGE
+            # SEND BoS DATA TO GODOT BRIDGE WITH ENHANCED VALIDATION
             # ============================================================
+            # Validate and clean polygon data before sending
+            left_foot_clean = validate_polygon_data(self.foot_numpy_points[1])
+            right_foot_clean = validate_polygon_data(self.foot_numpy_points[0])
+            
             bos_data = {
-                'left_foot': self.foot_numpy_points[1].tolist() if self.foot_numpy_points[1] is not None else None,
-                'right_foot': self.foot_numpy_points[0].tolist() if self.foot_numpy_points[0] is not None else None,
-                # 'left_heel': left_heel.flatten().tolist() if not np.isnan(left_heel).any() else None,
-                # 'left_toe': left_toe.flatten().tolist() if not np.isnan(left_toe).any() else None,
-                # 'right_heel': right_heel.flatten().tolist() if not np.isnan(right_heel).any() else None,
-                # 'right_toe': right_toe.flatten().tolist() if not np.isnan(right_toe).any() else None
+                'left_foot': left_foot_clean,  # Already validated, will be None if invalid
+                'right_foot': right_foot_clean  # Already validated, will be None if invalid
             }
-            self.godot_bridge.update_BoS_data(bos_data)
-      
+            
+            # Only send if at least one foot is valid
+            if left_foot_clean is not None or right_foot_clean is not None:
+                self.godot_bridge.update_BoS_data(bos_data)
+                # Optional: Add debug counter if needed
+                # if not hasattr(self, '_bos_send_counter'):
+                #     self._bos_send_counter = 0
+                # self._bos_send_counter += 1
+                # if self._bos_send_counter % 100 == 0:
+                #     print(f"📤 BoS #{self._bos_send_counter}: Left={left_foot_clean is not None}, Right={right_foot_clean is not None}")
+            
 
     def run_aruco(self, visualizer, w, h, mat, dist, frame):
         """
@@ -840,6 +946,7 @@ class BOSEstimator:
                             ref_translation, ref_rotation_matrix,
                             ref_translation, ref_rotation_matrix, corrected_keypoints
                         )
+                        print(keypoints_from_ref_board)
 
                         with data_lock:
                             pose_3d_keypoints[:] = keypoints_from_ref_board
@@ -850,11 +957,18 @@ class BOSEstimator:
                         with data_lock:
                             angles[:] = keypoint_angle
 
+                        # fbp_data = {
+                        #     'keypoints_3d': keypoints_from_ref_board.tolist(),
+                        #     'angles': keypoint_angle.flatten().tolist(),
+                        #     'timestamp': time.time()
+                        # }
                         fbp_data = {
-                            'keypoints_3d': keypoints_from_ref_board.tolist(),
-                            'angles': keypoint_angle.flatten().tolist(),
-                            'timestamp': time.time()
+                            'keypoints_3d': sanitize_for_json(keypoints_from_ref_board),
+                            # 'angles': sanitize_for_json(keypoint_angle.flatten()),
+                            # 'timestamp': time.time()
                         }
+                        # print(fbp_data)
+
                         self.godot_bridge.update_FBP_data(fbp_data)
 
                         desired_keypoints = [

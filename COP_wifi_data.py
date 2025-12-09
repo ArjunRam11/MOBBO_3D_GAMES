@@ -106,8 +106,8 @@ class MobboData:
                     self._message_counters[addr] = self._message_counters.get(addr, 0) + 1
 
                     # Only print every 50th message to reduce console spam
-                    if self._message_counters[addr] % 50 == 0:
-                        print(f"[{self._message_counters[addr]}] {addr}: COPx={copx:+.3f}, COPy={copy:+.3f}, W={w:+.3f}")
+                    # if self._message_counters[addr] % 50 == 0:
+                        # print(f"[{self._message_counters[addr]}] {addr}: COPx={copx:+.3f}, COPy={copy:+.3f}, W={w:+.3f}")
 
                     # For debugging, uncomment the line below
                     # print(f"Received data from {addr}: COPx={copx:+3.3f}, COPy={copy:+3.3f}, W={w:+3.3f}", end='\r')
