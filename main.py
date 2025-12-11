@@ -53,7 +53,39 @@ from COP_wifi_data import MobboData
 from godot_bridge import GodotBridgeHelper
 
 
-
+def sanitize_fbp_data(keypoints_3d):
+    """
+    Sanitize FBP keypoints to ensure Godot-safe data
+    
+    Args:
+        keypoints_3d: numpy array of shape (N, 3)
+    
+    Returns:
+        List of lists with None for invalid values
+    """
+    if keypoints_3d is None:
+        return None
+    
+    if isinstance(keypoints_3d, np.ndarray):
+        # Check if all NaN
+        if np.all(np.isnan(keypoints_3d)):
+            return None
+        
+        sanitized = []
+        for row in keypoints_3d:
+            if len(row) >= 3:
+                x = None if np.isnan(row[0]) else float(row[0])
+                y = None if np.isnan(row[1]) else float(row[1])
+                z = None if np.isnan(row[2]) else float(row[2])
+                
+                # Only add if at least one coordinate is valid
+                if x is not None or y is not None or z is not None:
+                    sanitized.append([x, y, z])
+        
+        # Need at least 3 valid keypoints
+        return sanitized if len(sanitized) >= 3 else None
+    
+    return None
 def sanitize_for_json(data):
     """
     Recursively sanitize data for JSON serialization by replacing NaN/inf values with None.
@@ -486,13 +518,13 @@ class BOSEstimator:
             logger.info("BOS thread started")
 
             # Start Godot bridge when BOS processing starts
-            print("=" * 60)
-            print("🎮 STARTING GODOT BRIDGE - Port 8000")
-            print("=" * 60)
+            # print("=" * 60)
+            # print("🎮 STARTING GODOT BRIDGE - Port 8000")
+            # print("=" * 60)
             self.godot_bridge.start()
             logger.info("Godot bridge started - sending data to game")
-            print("✅ Godot bridge started successfully!")
-            print("=" * 60)
+            # print("✅ Godot bridge started successfully!")
+            # print("=" * 60)
 
         self.aruco_thread_ = threading.Thread(target=self.run_aruco, args=(self.visualizer,1280, 720, MAT, DIST,frame))
         self.aruco_thread_.start()
@@ -737,18 +769,25 @@ class BOSEstimator:
                         total_weight=total_weight
                     )
 
-                    # Debug: Print every 100 loops to verify sending
-                    # if hasattr(self, '_send_counter'):
-                    #     self._send_counter += 1
-                    # else:
-                    #     self._send_counter = 1
+                    # ============================================================
+                    # DEBUG: Verify CoP data is being sent
+                    # ============================================================
+                    # if not hasattr(self, '_send_counter'):
+                    #     self._send_counter = 0
+                    # self._send_counter += 1
 
                     # if self._send_counter % 100 == 0:
-                    #     print(f"📤 Sent #{self._send_counter}: "
-                    #         f"Local CoPs={len(local_cops_data)}, "
-                    #         f"GCoP X={gcop_data['x']:.4f if gcop_data['x'] else 'None'}, "
-                    #         f"Y={gcop_data['y']:.4f if gcop_data['y'] else 'None'}, "
-                    #         f"W={total_weight:.2f}")
+                    #     print(f"📤 PYTHON->GODOT CoP Packet #{self._send_counter}:")
+                    #     print(f"   Local CoPs: {len(local_cops_data)}")
+                    #     if len(local_cops_data) > 0:
+                    #         lc = local_cops_data[0]
+                    #         print(f"   Local[0]: x={lc['x']:.4f if lc['x'] else 'None'}, "
+                    #               f"y={lc['y']:.4f if lc['y'] else 'None'}, "
+                    #               f"w={lc['weight']:.2f if lc['weight'] else 'None'}")
+                    #     print(f"   GCoP: x={gcop_data['x']:.4f if gcop_data['x'] else 'None'}, "
+                    #           f"y={gcop_data['y']:.4f if gcop_data['y'] else 'None'}, "
+                    #           f"z={gcop_data['z']:.4f if gcop_data['z'] else 'None'}, "
+                    #           f"W={total_weight:.2f}")
 
             time.sleep(0.01)
 
@@ -756,7 +795,8 @@ class BOSEstimator:
 
 
    
-    def foot_shape_get_numpy_and_scatter_points(self, foot_keys, right_heel, right_toe, left_heel, left_toe):
+    def foot_shape_get_numpy_and_scatter_points(self, foot_keys, right_heel, 
+                                                right_toe, left_heel, left_toe):
         """
         Generate foot polygon points and send BoS data to Godot bridge
         """
@@ -804,8 +844,8 @@ class BOSEstimator:
             }
             
             # Only send if at least one foot is valid
-            if left_foot_clean is not None or right_foot_clean is not None:
-                self.godot_bridge.update_BoS_data(bos_data)
+            # if left_foot_clean is not None or right_foot_clean is not None:
+            #     self.godot_bridge.update_BoS_data(bos_data)
                 # Optional: Add debug counter if needed
                 # if not hasattr(self, '_bos_send_counter'):
                 #     self._bos_send_counter = 0
@@ -867,10 +907,10 @@ class BOSEstimator:
                     
                     # Check if changed
                     if self._has_board_configuration_changed(current_board_data):
-                        print("🔄 Board configuration changed - resending data")
+                        # print("🔄 Board configuration changed - resending data")
                         self.godot_bridge.update_Boardpose_data(current_board_data)
                         self.previous_board_pose_hash = self._calculate_board_pose_hash(current_board_data)
-                        print("✅ Updated board pose data sent to Godot")
+                        # print("✅ Updated board pose data sent to Godot")
 
             # ============================================================
             # REST OF THE FOOT AND BODY PROCESSING (unchanged)
@@ -892,7 +932,8 @@ class BOSEstimator:
                     board_data = self.board_points_3d
 
                     if not board_data:
-                        print("Error: No board points data available!")
+                        # print("Error: No board points data available!")
+                        pass
                     else:
                         foot_start = True
 
@@ -946,7 +987,7 @@ class BOSEstimator:
                             ref_translation, ref_rotation_matrix,
                             ref_translation, ref_rotation_matrix, corrected_keypoints
                         )
-                        print(keypoints_from_ref_board)
+                        # print(keypoints_from_ref_board)
 
                         with data_lock:
                             pose_3d_keypoints[:] = keypoints_from_ref_board
@@ -963,13 +1004,12 @@ class BOSEstimator:
                         #     'timestamp': time.time()
                         # }
                         fbp_data = {
-                            'keypoints_3d': sanitize_for_json(keypoints_from_ref_board),
-                            # 'angles': sanitize_for_json(keypoint_angle.flatten()),
-                            # 'timestamp': time.time()
-                        }
-                        # print(fbp_data)
-
-                        self.godot_bridge.update_FBP_data(fbp_data)
+                                'keypoints_3d': sanitize_fbp_data(keypoints_from_ref_board),
+                            }
+                        
+                       # Only send if valid
+                        # if fbp_data['keypoints_3d'] is not None:
+                            # self.godot_bridge.update_FBP_data(fbp_data)
 
                         desired_keypoints = [
                             'head', 'neck', 'right_shoulder', 'left_shoulder',
