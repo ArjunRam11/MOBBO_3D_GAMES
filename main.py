@@ -631,6 +631,7 @@ class BOSEstimator:
             'id': int(self.reference_board_id),
             'relative_rotation_matrix': np.eye(3).flatten().tolist(),  # Identity matrix
             'relative_translation': [0.0, 0.0, 0.0]}  # Zero translation 
+            print(self.relative_rotations)
 
             # Add relative pose data for each non-reference board
             for board_id in self.relative_rotations.keys():
