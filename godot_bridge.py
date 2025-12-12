@@ -177,241 +177,56 @@ class GodotBridge:
         self.stop()
         self.sock.close()
 
-
-# class GodotBridgeHelper:
-#     """Helper class to integrate GodotBridge with BOSEstimator"""
-
-#     def __init__(self, gcop_array, data_lock, godot_ip="127.0.0.1", godot_port=8000,
-#                  data_format="json"):  # Changed default to "json"
-#         """
-#         Initialize helper
-
-#         Args:
-#             gcop_array: Reference to global gcop1 array
-#             data_lock: Threading lock for safe access
-#             godot_ip: Godot IP address
-#             godot_port: Godot UDP port
-#             data_format: "json" or "binary" (default: "json")
-#         """
-#         self.gcop_array = gcop_array
-#         self.data_lock = data_lock
-#         self.total_weight = 0.0
-#         self.all_cops = []
-        
-#         # Store all data types
-#         self.board_pose_data = None
-#         self.bos_data = None
-#         self.fbp_data = None
-
-#         # Create bridge
-#         self.bridge = GodotBridge(godot_ip, godot_port, data_format=data_format)
-#         self.bridge.set_data_callback(self._get_all_data)
-
-#     def _get_all_data(self) -> Optional[dict]:
-#         """Callback to get ALL available data in one JSON packet"""
-#         try:
-#             with self.data_lock:
-#                 data = {
-#                     "timestamp": time.time()
-#                 }
-                
-#                 # Add CoP data (always include, even if NaN)
-#                 if self.gcop_array is not None:
-#                     flat_array = np.array(self.gcop_array).flatten()
-#                     if not np.all(np.isnan(flat_array)):
-#                         data["cop"] = {
-#                             "type": "gcop",
-#                             "x": float(flat_array[0]),
-#                             "y": float(flat_array[1]),
-#                             "z": float(flat_array[2]),
-#                             "weight": float(self.total_weight),
-#                             "num_cops": len(self.all_cops)
-#                         }
-                
-#                 # Add Board Pose data if available
-#                 if self.board_pose_data:
-#                     data["board_pose"] = self.board_pose_data
-                
-#                 # Add BoS data if available
-#                 if self.bos_data:
-#                     data["bos"] = self.bos_data
-                
-#                 # Add FBP data if available
-#                 if self.fbp_data:
-#                     data["fbp"] = self.fbp_data
-                
-#                 # Only send if we have at least one type of data
-#                 return data if len(data) > 1 else None  # >1 because timestamp is always there
-                
-#         except Exception as e:
-#             logger.error(f"Error getting data: {e}")
-#         return None
-
-#     def update_cop_data(self, gcop_array, total_weight):
-#         """Update CoP data for transmission"""
-#         with self.data_lock:
-#             if gcop_array is not None:
-#                 self.gcop_array[:] = gcop_array
-#             self.total_weight = total_weight
-    
-#     def update_Boardpose_data(self, board_xyz):
-#         """Update Boardpose data for transmission"""
-#         self.board_pose_data = {
-#             "type": "board_pose",
-#             "data": board_xyz
-#         }
-    
-#     def update_BoS_data(self, BOS_XYZ):
-#         """Update BOS data for transmission"""
-#         self.bos_data = {
-#             "type": "bos",
-#             "data": BOS_XYZ
-#         }
-    
-#     def update_FBP_data(self, FBP_XYZ):
-#         """Update FBP data for transmission"""
-#         self.fbp_data = {
-#             "type": "fbp",
-#             "data": FBP_XYZ
-#         }
-
-#     def start(self):
-#         """Start sending to Godot"""
-#         self.bridge.start()
-#         logger.info("GodotBridgeHelper started - sending JSON data")
-
-#     def stop(self):
-#         """Stop sending to Godot"""
-#         self.bridge.stop()
-#         logger.info("GodotBridgeHelper stopped")
-
-#     def get_status(self):
-#         """Get status"""
-#         return self.bridge.get_status()
-
-
-# class GodotBridgeHelper:
-#     """Helper class to integrate GodotBridge with BOSEstimator"""
-
-#     def __init__(self, gcop_array, data_lock, godot_ip="127.0.0.1", godot_port=9999,
-#                  data_format="binary"):
-#         """
-#         Initialize helper
-
-#         Args:
-#             gcop_array: Reference to global gcop1 array
-#             data_lock: Threading lock for safe access
-#             godot_ip: Godot IP address
-#             godot_port: Godot UDP port
-#             data_format: "json" or "binary" (default: "binary")
-#         """
-#         self.gcop_array = gcop_array
-#         self.data_lock = data_lock
-#         self.total_weight = 0.0
-#         self.all_cops = []
-#         self.board_pose_data = None
-#         self.bos_data = None
-#         self.fbp_data = None
-
-
-#         # Create bridge
-#         self.bridge = GodotBridge(godot_ip, godot_port, data_format=data_format)
-#         self.bridge.set_data_callback(self._get_gcop_data)
-
-#     def _get_gcop_data(self) -> Optional[dict]:
-#         """Callback to get current Gcop data"""
-#         try:
-#             with self.data_lock:
-#                 data = {}
-#                 if self.gcop_array is not None and not np.all(np.isnan(self.gcop_array)):
-#                     # Flatten array to ensure 1D access
-#                     flat_array = np.array(self.gcop_array).flatten()
-
-#                     data["cop"] = {
-#                         "x": float(flat_array[0]),
-#                         "y": float(flat_array[1]),
-#                         "z": float(flat_array[2]),
-#                         "weight": float(self.total_weight),
-#                     }
-#                 if self.board_pose_data:
-#                     data["board_pose"] = self.board_pose_data
-#                 if self.bos_data:
-#                     data["bos"] = self.bos_data
-#                 if self.fbp_data:
-#                     data["fbp"] = self.fbp_data
-#                 return data if data else None
-#         except Exception as e:
-#             logger.error(f"Error getting Gcop data: {e}")
-#         return None
-
-#     def update_cop_data(self, all_cops, total_weight):
-#         """Update CoP data for transmission"""
-#         self.all_cops = all_cops
-#         self.total_weight = total_weight
-#     def update_Boardpose_data(self, board_XYZ):
-#         """Update Boardpose data for transmission"""
-#         self.board_XYZ = board_XYZ
-#     def update_BoS_data(self, BOS_XYZ):
-#         """Update BOS data for transmission"""
-#         self.BOS_XYZ = BOS_XYZ
-#     def update_FBP_data(self, FBP_XYZ):
-#         """Update FBP data for transmission"""
-#         self.FBP_XYZ = FBP_XYZ
-
-#     def start(self):
-#         """Start sending to Godot"""
-#         self.bridge.start()
-#         logger.info("GodotBridgeHelper started")
-
-#     def stop(self):
-#         """Stop sending to Godot"""
-#         self.bridge.stop()
-#         logger.info("GodotBridgeHelper stopped")
-
-#     def get_status(self):
-#         """Get status"""
-#         return self.bridge.get_status()
 """
 Updated GodotBridgeHelper with optimized board pose sending
 Only sends board pose initially and when configuration changes
 """
 
 class GodotBridgeHelper:
-    """Helper class to integrate GodotBridge with BOSEstimator"""
+    """Helper class to integrate GodotBridge with BOSEstimator - DUAL UDP PORT VERSION"""
 
     def __init__(self, gcop_array, data_lock, godot_ip="127.0.0.1", godot_port=8000,
-                 data_format="json"):
+                 godot_port_camera=8001, data_format="json"):
         """
-        Initialize helper
+        Initialize helper with DUAL UDP ports
 
         Args:
             gcop_array: Reference to global gcop1 array
             data_lock: Threading lock for safe access
             godot_ip: Godot IP address
-            godot_port: Godot UDP port
+            godot_port: UDP port for high-frequency data (CoP, Board Pose) - default 8000
+            godot_port_camera: UDP port for camera data (FBP, BoS) - default 8001
             data_format: "json" or "binary" (default: "json")
         """
         self.gcop_array = gcop_array
         self.data_lock = data_lock
         self.total_weight = 0.0
-        
+
         # Store local CoPs and global CoP separately
         self.local_cops = []  # List of local CoP dictionaries
         self.gcop = None      # Global CoP dictionary
-        
+
         # Store all other data types
         self.board_pose_data = None
         self.bos_data = None
         self.fbp_data = None
-        
+
         # Board pose change tracking
         self.board_pose_sent = False
         self.previous_board_pose_hash = None
         self.send_board_pose_next = False
 
-        # Create bridge
+        # Create PRIMARY bridge for CoP + Board Pose (high frequency)
         self.bridge = GodotBridge(godot_ip, godot_port, data_format=data_format)
-        self.bridge.set_data_callback(self._get_all_data)
+        self.bridge.set_data_callback(self._get_cop_data)
+
+        # Create SECONDARY bridge for FBP + BoS (camera frequency)
+        self.bridge_camera = GodotBridge(godot_ip, godot_port_camera, data_format=data_format, send_rate=0.033)
+        self.bridge_camera.set_data_callback(self._get_camera_data)
+
+        logger.info(f"🎮 Dual UDP Bridge initialized:")
+        logger.info(f"   Port {godot_port}: CoP + Board Pose (high frequency)")
+        logger.info(f"   Port {godot_port_camera}: FBP + BoS (camera frequency)")
 
     def _calculate_board_pose_hash(self, board_data: dict) -> int:
         """Calculate a hash of the board pose data to detect changes."""
@@ -424,48 +239,63 @@ class GodotBridgeHelper:
         
         return hash((ref_id, board_ids))
 
-    def _get_all_data(self) -> Optional[dict]:
-        """Callback to get ALL available data in one JSON packet"""
+    def _get_cop_data(self) -> Optional[dict]:
+        """Callback for PRIMARY UDP port (8000) - CoP + Board Pose only"""
         try:
             with self.data_lock:
                 data = {
                     "timestamp": time.time()
                 }
-                
+
                 # Add CoP data (both local and global)
                 if self.local_cops or self.gcop:
                     cop_data = {}
-                    
+
                     # Add local CoPs if available
                     if self.local_cops:
                         cop_data["local_cops"] = self.local_cops
-                    
+
                     # Add global CoP if available
                     if self.gcop:
                         cop_data["gcop"] = self.gcop
-                    
+
                     if cop_data:
                         data["cop"] = cop_data
-                
+
                 # Add Board Pose data ONLY if flagged to send
                 if self.send_board_pose_next and self.board_pose_data:
                     data["board_pose"] = self.board_pose_data
                     self.send_board_pose_next = False
-                    logger.info("📤 Sending board pose data to Godot")
-                
+                    logger.info("📤 Sending board pose data to Godot (Port 8000)")
+
+                # Only send if we have at least one type of data
+                return data if len(data) > 1 else None
+
+        except Exception as e:
+            logger.error(f"Error getting CoP data: {e}")
+        return None
+
+    def _get_camera_data(self) -> Optional[dict]:
+        """Callback for SECONDARY UDP port (8001) - FBP + BoS only"""
+        try:
+            with self.data_lock:
+                data = {
+                    "timestamp": time.time()
+                }
+
                 # Add BoS data if available
                 if self.bos_data:
                     data["bos"] = self.bos_data
-                
+
                 # Add FBP data if available
                 if self.fbp_data:
                     data["fbp"] = self.fbp_data
-                
+
                 # Only send if we have at least one type of data
                 return data if len(data) > 1 else None
-                
+
         except Exception as e:
-            logger.error(f"Error getting data: {e}")
+            logger.error(f"Error getting camera data: {e}")
         return None
 
     def update_cop_data(self, local_cops: list, gcop: dict, total_weight: float):
@@ -525,14 +355,18 @@ class GodotBridgeHelper:
         }
 
     def start(self):
-        """Start sending to Godot"""
-        self.bridge.start()
-        logger.info("GodotBridgeHelper started - sending JSON data with local CoPs and GCoP")
+        """Start sending to Godot on BOTH UDP ports"""
+        self.bridge.start()  # Port 8000: CoP + Board Pose
+        self.bridge_camera.start()  # Port 8001: FBP + BoS
+        logger.info("✅ GodotBridgeHelper started (Dual UDP)")
+        logger.info("   Port 8000: Sending CoP + Board Pose")
+        logger.info("   Port 8001: Sending FBP + BoS")
 
     def stop(self):
-        """Stop sending to Godot"""
+        """Stop sending to Godot on BOTH UDP ports"""
         self.bridge.stop()
-        logger.info("GodotBridgeHelper stopped")
+        self.bridge_camera.stop()
+        logger.info("🛑 GodotBridgeHelper stopped (both ports)")
 
     def get_status(self):
         """Get status"""

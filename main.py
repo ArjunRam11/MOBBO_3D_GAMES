@@ -845,8 +845,8 @@ class BOSEstimator:
             }
             
             # Only send if at least one foot is valid
-            # if left_foot_clean is not None or right_foot_clean is not None:
-            #     self.godot_bridge.update_BoS_data(bos_data)
+            if left_foot_clean is not None or right_foot_clean is not None:
+                self.godot_bridge.update_BoS_data(bos_data)
                 # Optional: Add debug counter if needed
                 # if not hasattr(self, '_bos_send_counter'):
                 #     self._bos_send_counter = 0
@@ -1009,8 +1009,8 @@ class BOSEstimator:
                             }
                         
                        # Only send if valid
-                        # if fbp_data['keypoints_3d'] is not None:
-                            # self.godot_bridge.update_FBP_data(fbp_data)
+                        if fbp_data['keypoints_3d'] is not None:
+                            self.godot_bridge.update_FBP_data(fbp_data)
 
                         desired_keypoints = [
                             'head', 'neck', 'right_shoulder', 'left_shoulder',

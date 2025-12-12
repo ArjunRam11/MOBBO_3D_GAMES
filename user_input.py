@@ -1,8 +1,3 @@
- 
-
-
-
-
 from PyQt5 import QtWidgets, QtGui
 import os
 from datetime import datetime
