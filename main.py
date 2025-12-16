@@ -15,6 +15,7 @@ import sys
 import time
 import threading
 import logging
+import json
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, field
 from contextlib import contextmanager
@@ -473,12 +474,32 @@ class BOSEstimator:
             data_format="json"    # Changed from "binary" to "json"
         )
 
+        # ============================================================
+        # COMMAND SOCKET FOR GODOT RESET COMMANDS (UDP PORT 9000)
+        # ============================================================
+        self._command_socket = None
+        self._init_command_socket()
+
         logger.info("BOSEstimator initialized with optimized architecture")
 
     def set_visualizer(self, visualizer):
         """Set the visualizer reference after initialization"""
         self.visualizer = visualizer
 
+    def _init_command_socket(self):
+        """Initialize UDP socket for receiving Godot commands on port 9000"""
+        try:
+            import socket
+            self._command_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._command_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._command_socket.bind(("127.0.0.1", 9000))
+            self._command_socket.settimeout(0.1)  # Non-blocking with 100ms timeout
+            logger.info("📡 Command receiver listening on UDP port 9000")
+            print("✅ SUCCESS: Command receiver listening on UDP port 9000")
+        except Exception as e:
+            logger.error(f"Failed to initialize command socket: {e}")
+            print(f"❌ ERROR: Failed to initialize command socket: {e}")
+            self._command_socket = None
 
     def stop_all_threads(self):
 
@@ -495,18 +516,58 @@ class BOSEstimator:
          logger.info("Godot bridge stopped")
 
          self.foot_detection_model.foot_prediction_stopthread()
-         if self.bos_thread_running and  self.bos_thread is not None:
-            #  print("compute bos is join")
-             self.bos_thread.join()
-             self.bos_thread_running=False
+
+         # ============================================================
+         # FIXED: Use timeout + check if called from within thread
+         # ============================================================
+         if self.bos_thread_running and self.bos_thread is not None:
+             try:
+                 # Check if we're being called FROM the BOS thread itself
+                 # If so, skip join (thread can't join itself)
+                 if threading.current_thread() != self.bos_thread:
+                     # Wait max 2 seconds for thread to finish
+                     self.bos_thread.join(timeout=2.0)
+                     print("✅ BOS thread stopped cleanly")
+                 else:
+                     # Called from within the BOS thread (during reset)
+                     # Just set flag - thread will exit naturally when it sees the stop flags
+                     print("✅ BOS thread stop initiated (called from within thread)")
+                 self.bos_thread_running = False
+             except Exception as e:
+                 print(f"⚠️ Error stopping BOS thread: {e}")
+                 self.bos_thread_running = False
 
 
     def reset_all_threads(self):
-        """Restart BOS processing without stopping all threads."""
-        # print("Restarting process...")
-        self.button=ResetButtonProcess()
-        # Start a new worker thread without quitting or closing existing threads
-        self.button.start_worker_thread(self.frame,self)
+        """Restart BOS processing: Re-detect boards and restart compute_COP thread."""
+        try:
+            # Step 1: Re-detect board positions (with NEW reference frame)
+            print("🔍 Re-detecting board positions...")
+            self.board_pose_detected_set(self.frame)
+            print("✅ New board positions detected")
+
+            # Step 2: Signal that board pose has CHANGED (force send to Godot)
+            print("📡 Signaling board pose change to Godot...")
+            self.godot_bridge.send_board_pose_next = True
+            print("✅ Board pose change flag set")
+
+            # Step 3: Restart the continuous compute_COP thread
+            print("▶️ Restarting compute_COP thread...")
+            # CRITICAL: Force flag to False before creating new thread
+            # (even though stop_all_threads() should have done this)
+            self.bos_thread_running = False
+            time.sleep(0.1)  # Give old thread extra time to exit
+
+            # Now create and start the new thread
+            self.bos_thread = threading.Thread(target=self.compute_COP)
+            self.bos_thread.start()
+            self.bos_thread_running = True
+            print("✅ compute_COP thread restarted successfully")
+
+        except Exception as e:
+            print(f"❌ Error during reset_all_threads: {e}")
+            import traceback
+            traceback.print_exc()
 
     def thread_process_all(self,frame):
         global process_complete
@@ -680,6 +741,52 @@ class BOSEstimator:
         global stop_flag_aruco, stop_threads
 
         while stop_threads and stop_flag_aruco:
+            # ============================================================
+            # CHECK FOR RESET COMMAND FROM GODOT VIA UDP PORT 9000
+            # ============================================================
+            if self._command_socket:
+                try:
+                    # Try to receive command (non-blocking)
+                    data, addr = self._command_socket.recvfrom(1024)
+                    if data:
+                        try:
+                            command_str = data.decode('utf-8')
+                            command = json.loads(command_str)
+
+                            if command.get('type') == 'reset_board' and command.get('action') == 'stop_all_threads':
+                                print("\n📨 Reset board command received from Godot!")
+                                print("🔴 Stopping all threads...")
+
+                                try:
+                                    # Stop all threads (with timeout protection)
+                                    self.stop_all_threads()
+
+                                    print("⏳ Waiting 1 second for graceful shutdown...")
+                                    time.sleep(1)
+
+                                    print("🟢 Restarting board detection...")
+                                    self.reset_all_threads()
+
+                                    print("✅ Board reset complete!\n")
+
+                                    # CRITICAL: Break out of the loop so this thread can exit
+                                    # and the new thread from reset_all_threads() can take over
+                                    break
+
+                                except Exception as e:
+                                    print(f"❌ Error during reset sequence: {e}")
+                                    print("⚠️ Reset may be incomplete, but continuing...")
+                                    self.bos_thread_running = False
+                                    break
+
+                        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                            logger.warning(f"Invalid command format: {e}")
+
+                except Exception as e:
+                    # Socket timeout is expected - just continue
+                    if "timed out" not in str(e).lower():
+                        logger.warning(f"Error receiving command: {e}")
+
             if self.mobbo.cop_data:
                 addr_keys = list(self.mobbo.cop_data.keys())
 
@@ -854,7 +961,6 @@ class BOSEstimator:
                 # if self._bos_send_counter % 100 == 0:
                 #     print(f"📤 BoS #{self._bos_send_counter}: Left={left_foot_clean is not None}, Right={right_foot_clean is not None}")
             
-
     def run_aruco(self, visualizer, w, h, mat, dist, frame):
         """
         Modified run_aruco with board pose change detection
