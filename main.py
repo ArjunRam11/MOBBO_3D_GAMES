@@ -51,6 +51,7 @@ from pyqtlibrary import (
 )
 from noisecancellation import update_buffer
 from COP_wifi_data import MobboData
+import COP_wifi_data  # Import module to access stop_flag_wifi2
 from godot_bridge import GodotBridgeHelper
 
 
@@ -524,7 +525,7 @@ class BOSEstimator:
 
     def stop_all_threads(self):
 
-         global stop_flag_aruco ,stop_threads,process_complete, stop_flag_wifi2
+         global stop_flag_aruco ,stop_threads,process_complete
 
          logger.info("=" * 70)
          logger.info("🛑 STOPPING ALL THREADS - Reset initiated")
@@ -532,7 +533,7 @@ class BOSEstimator:
 
          # Stop WiFi CoP data collection thread first
          logger.info("  1️⃣ Stopping WiFi CoP thread (mobbo.get_device_data)...")
-         stop_flag_wifi2 = False
+         COP_wifi_data.stop_flag_wifi2 = False
          if self.Cop_thread is not None and hasattr(self, 'Cop_thread'):
              try:
                  self.Cop_thread.join(timeout=2.0)
@@ -586,7 +587,7 @@ class BOSEstimator:
 
     def reset_all_threads(self):
         """Restart BOS processing: Re-detect boards and restart ALL threads."""
-        global stop_threads, stop_flag_aruco
+        global stop_threads, stop_flag_aruco, process_complete
 
         logger.info("=" * 70)
         logger.info("🔄 RESET_ALL_THREADS: Starting board re-detection and thread restart...")
@@ -645,8 +646,7 @@ class BOSEstimator:
 
             logger.info("  8️⃣ Starting new WiFi CoP thread (mobbo.get_device_data)...")
             # Re-enable WiFi CoP thread to restart force sensor data collection
-            global stop_flag_wifi2
-            stop_flag_wifi2 = True
+            COP_wifi_data.stop_flag_wifi2 = True
             self.Cop_thread = threading.Thread(target=self.mobbo.get_device_data)
             self.Cop_thread.daemon = False
             self.Cop_thread.start()
@@ -661,10 +661,11 @@ class BOSEstimator:
             # Still try to restart the threads even if board detection failed
             try:
                 # CRITICAL: Set flags to True so new threads can run
-                global stop_flag_wifi2
+                global stop_threads, stop_flag_aruco, process_complete
                 stop_threads = True
                 stop_flag_aruco = True
-                stop_flag_wifi2 = True
+                process_complete = False
+                COP_wifi_data.stop_flag_wifi2 = True
 
                 self.bos_thread_running = False
                 time.sleep(0.1)
