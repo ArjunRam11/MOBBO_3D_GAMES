@@ -224,9 +224,21 @@ class GodotBridgeHelper:
         self.bridge_camera = GodotBridge(godot_ip, godot_port_camera, data_format=data_format, send_rate=0.033)
         self.bridge_camera.set_data_callback(self._get_camera_data)
 
+        # ============================================================
+        # COMMAND RECEPTION FROM GODOT
+        # ============================================================
+        # This simulates a "network_manager" object for Godot command communication
+        # Godot's BoardSetup.gd uses set_meta("reset_board_requested", true)
+        # We store it here for Python to detect
+        self.network_manager = type('NetworkManager', (), {})()
+        self.network_manager.reset_board_requested = False
+        self.network_manager.control_command = {}
+        self.network_manager.recording_command = {}
+
         logger.info(f"🎮 Dual UDP Bridge initialized:")
         logger.info(f"   Port {godot_port}: CoP + Board Pose (high frequency)")
         logger.info(f"   Port {godot_port_camera}: FBP + BoS (camera frequency)")
+        logger.info(f"   Command reception: Enabled (reset_board_requested flag)")
 
     def _calculate_board_pose_hash(self, board_data: dict) -> int:
         """Calculate a hash of the board pose data to detect changes."""
@@ -312,28 +324,28 @@ class GodotBridgeHelper:
             self.gcop = gcop if gcop else None
             self.total_weight = total_weight
     
-    def update_Boardpose_data(self, board_xyz):
+    def update_Boardpose_data(self, board_xyz, force_send=False):
         """
         Update Board pose data for transmission.
-        Only flags for sending if:
-        1. First time (never sent before)
-        2. Board configuration changed
+        Flags for sending if:
+        1. force_send=True (used after board reset)
+        2. First time (never sent before)
+        3. Board configuration changed
         """
         new_board_data = {
             "type": "board_pose",
             "data": board_xyz
         }
         new_hash = self._calculate_board_pose_hash(new_board_data)
-        
-        should_send = False
-        
-        if not self.board_pose_sent:
-            should_send = True
-            logger.info("🆕 First board pose data - flagging for send")
-        elif new_hash != self.previous_board_pose_hash:
-            should_send = True
-            logger.info("🔄 Board configuration changed - flagging for send")
-        
+
+        should_send = force_send
+
+        if not force_send:
+            if not self.board_pose_sent:
+                should_send = True
+            elif new_hash != self.previous_board_pose_hash:
+                should_send = True
+
         if should_send:
             self.board_pose_data = new_board_data
             self.send_board_pose_next = True
