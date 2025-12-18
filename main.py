@@ -480,6 +480,27 @@ class BOSEstimator:
         self._command_socket = None
         self._init_command_socket()
 
+        # ============================================================
+        # DATA RECORDING STATE
+        # ============================================================
+        self.recording_active = False
+        self.recording_data_types = {
+            "cop": False,
+            "bos": False,
+            "angles": False
+        }
+        self.recording_writers = {
+            "cop": None,
+            "bos": None,
+            "angles": None
+        }
+        self.recording_files = {
+            "cop": None,
+            "bos": None,
+            "angles": None
+        }
+        self.recording_trial_path = None
+
         logger.info("BOSEstimator initialized with optimized architecture")
 
     def set_visualizer(self, visualizer):
@@ -492,31 +513,55 @@ class BOSEstimator:
             import socket
             self._command_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self._command_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # Increase receive buffer size
+            self._command_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
             self._command_socket.bind(("127.0.0.1", 9000))
-            self._command_socket.settimeout(0.1)  # Non-blocking with 100ms timeout
-            logger.info("Command receiver listening on UDP port 9000")
+            self._command_socket.settimeout(0.05)  # 50ms timeout for faster response
+            logger.info("✅ Command receiver listening on UDP port 9000")
         except Exception as e:
-            logger.error(f"Failed to initialize command socket: {e}")
+            logger.error(f"❌ Failed to initialize command socket on port 9000: {e}")
             self._command_socket = None
 
     def stop_all_threads(self):
 
-         global stop_flag_aruco ,stop_threads,process_complete
+         global stop_flag_aruco ,stop_threads,process_complete, stop_flag_wifi2
+
+         logger.info("=" * 70)
+         logger.info("🛑 STOPPING ALL THREADS - Reset initiated")
+         logger.info("=" * 70)
+
+         # Stop WiFi CoP data collection thread first
+         logger.info("  1️⃣ Stopping WiFi CoP thread (mobbo.get_device_data)...")
+         stop_flag_wifi2 = False
+         if self.Cop_thread is not None and hasattr(self, 'Cop_thread'):
+             try:
+                 self.Cop_thread.join(timeout=2.0)
+                 logger.info("  ✅ WiFi CoP thread stopped")
+             except Exception as e:
+                 logger.warning(f"  ⚠️ WiFi CoP thread stop: {e}")
+
+         # Stop global processing flags
+         logger.info("  2️⃣ Disabling global processing flags...")
          stop_flag_aruco = False
-         stop_threads=False
-         process_complete=False
+         stop_threads = False
+         process_complete = False
+         logger.info("  ✅ Global flags disabled")
+
+         # Clear board data
+         logger.info("  3️⃣ Clearing board data...")
          with data_lock:
             varboard[0]=[""]
             referenceboard[0]=[" "]
 
-         # Keep Godot bridge running during reset - only stop on shutdown
-         # self.godot_bridge.stop()
-
+         # Stop foot detection model
+         logger.info("  4️⃣ Stopping foot detection model...")
          self.foot_detection_model.foot_prediction_stopthread()
+         logger.info("  ✅ Foot detection stopped")
 
          # ============================================================
-         # FIXED: Use timeout + check if called from within thread
+         # FIXED: Stop BOS thread with timeout + check if called from within thread
          # ============================================================
+         logger.info("  5️⃣ Stopping BOS compute thread...")
          if self.bos_thread_running and self.bos_thread is not None:
              try:
                  # Check if we're being called FROM the BOS thread itself
@@ -526,61 +571,123 @@ class BOSEstimator:
                      self.bos_thread.join(timeout=2.0)
                  else:
                      # Called from within the BOS thread (during reset)
+                     logger.info("  ℹ️ Stop called from within BOS thread - skipping join")
                      pass
                  self.bos_thread_running = False
+                 logger.info("  ✅ BOS thread stopped")
              except Exception as e:
                  logger.error(f"Error stopping BOS thread: {e}")
                  self.bos_thread_running = False
 
+         logger.info("=" * 70)
+         logger.info("✅ ALL THREADS STOPPED - Ready for re-initialization")
+         logger.info("=" * 70)
+
 
     def reset_all_threads(self):
         """Restart BOS processing: Re-detect boards and restart ALL threads."""
+        global stop_threads, stop_flag_aruco
+
+        logger.info("=" * 70)
+        logger.info("🔄 RESET_ALL_THREADS: Starting board re-detection and thread restart...")
+        logger.info("=" * 70)
+
         try:
+            logger.info("  1️⃣ Resetting Godot bridge flags...")
             # Reset the board_pose_sent flag to force re-send on next detection
             self.godot_bridge.board_pose_sent = False
             self.godot_bridge.previous_board_pose_hash = None
 
+            logger.info("  2️⃣ Re-detecting board positions...")
             # Re-detect board positions with NEW reference frame
             self.board_pose_detected_set(self.frame)
+            logger.info("  ✅ Board detection complete")
 
+            logger.info("  3️⃣ Sending updated board pose to Godot...")
             # CRITICAL: Force send the board pose data even if hash unchanged
             # (board might be in same position but still needs to re-render in Godot)
             if hasattr(self, '_last_board_xyz_data'):
                 self.godot_bridge.update_Boardpose_data(self._last_board_xyz_data, force_send=True)
+                logger.info("  ✅ Board pose sent to Godot")
 
+            logger.info("  4️⃣ Re-enabling thread control flags...")
+            # CRITICAL FIX: Set flags to True BEFORE starting new threads
+            # The new threads check: while stop_threads and stop_flag_aruco:
+            # So we must set them to True for the new threads to run
+            stop_threads = True
+            stop_flag_aruco = True
+            logger.info("  ✅ Thread control flags re-enabled")
+
+            logger.info("  5️⃣ Stopping old BOS thread...")
             # Restart the continuous compute_COP thread
             self.bos_thread_running = False
             time.sleep(0.1)  # Give old thread extra time to exit
+            logger.info("  ✅ BOS thread stopped")
 
+            logger.info("  6️⃣ Starting new BOS thread...")
             # Create and start the new BOS thread
             self.bos_thread = threading.Thread(target=self.compute_COP)
+            self.bos_thread.daemon = False
             self.bos_thread.start()
             self.bos_thread_running = True
+            logger.info("  ✅ New BOS thread started")
 
+            logger.info("  7️⃣ Starting new ArUco thread...")
             # CRITICAL: Restart ArUco/camera processing thread for FBP and BoS updates
             # This thread handles foot detection and pose estimation
             self.aruco_thread_ = threading.Thread(
                 target=self.run_aruco,
                 args=(self.visualizer, 1280, 720, MAT, DIST, self.frame)
             )
+            self.aruco_thread_.daemon = False
             self.aruco_thread_.start()
+            logger.info("  ✅ New ArUco thread started")
+
+            logger.info("  8️⃣ Starting new WiFi CoP thread (mobbo.get_device_data)...")
+            # Re-enable WiFi CoP thread to restart force sensor data collection
+            global stop_flag_wifi2
+            stop_flag_wifi2 = True
+            self.Cop_thread = threading.Thread(target=self.mobbo.get_device_data)
+            self.Cop_thread.daemon = False
+            self.Cop_thread.start()
+            logger.info("  ✅ New WiFi CoP thread started")
+
+            logger.info("=" * 70)
+            logger.info("✅ RESET_ALL_THREADS: Successfully completed all re-initialization steps")
+            logger.info("=" * 70)
 
         except Exception as e:
-            logger.error(f"Error during reset_all_threads: {e}")
+            logger.error(f"❌ Error during reset_all_threads: {e}")
             # Still try to restart the threads even if board detection failed
             try:
+                # CRITICAL: Set flags to True so new threads can run
+                global stop_flag_wifi2
+                stop_threads = True
+                stop_flag_aruco = True
+                stop_flag_wifi2 = True
+
                 self.bos_thread_running = False
                 time.sleep(0.1)
                 self.bos_thread = threading.Thread(target=self.compute_COP)
+                self.bos_thread.daemon = False
                 self.bos_thread.start()
                 self.bos_thread_running = True
+                logger.info("✅ Emergency: BOS thread restarted")
 
                 # Also restart ArUco thread
                 self.aruco_thread_ = threading.Thread(
                     target=self.run_aruco,
                     args=(self.visualizer, 1280, 720, MAT, DIST, self.frame)
                 )
+                self.aruco_thread_.daemon = False
                 self.aruco_thread_.start()
+                logger.info("✅ Emergency: ArUco thread restarted")
+
+                # Also restart WiFi CoP thread
+                self.Cop_thread = threading.Thread(target=self.mobbo.get_device_data)
+                self.Cop_thread.daemon = False
+                self.Cop_thread.start()
+                logger.info("✅ Emergency: WiFi CoP thread restarted")
             except Exception as thread_error:
                 logger.error(f"Failed to restart threads: {thread_error}")
 
@@ -776,9 +883,15 @@ class BOSEstimator:
                         try:
                             command_str = data.decode('utf-8')
                             command = json.loads(command_str)
+                            cmd_type = command.get('type', 'unknown')
+                            cmd_action = command.get('action', 'unknown')
+                            logger.info(f"📨 Command received from Godot: type={cmd_type}, action={cmd_action}")
 
-                            if command.get('type') == 'reset_board' and command.get('action') == 'stop_all_threads':
-                                logger.info("Reset board command received from Godot")
+                            if cmd_type == 'reset_board' and cmd_action == 'stop_all_threads':
+                                logger.info(f"🔄 RESET BOARD COMMAND RECEIVED - stopping threads and re-initializing...")
+                                print(f"\n{'='*60}")
+                                print(f"🔄 RESET INITIATED FROM GODOT")
+                                print(f"{'='*60}\n")
 
                                 try:
                                     # Stop all threads (with timeout protection)
@@ -795,6 +908,18 @@ class BOSEstimator:
                                     logger.error(f"Error during reset sequence: {e}")
                                     self.bos_thread_running = False
                                     break
+
+                            elif command.get('type') == 'data_recording':
+                                action = command.get('action')
+
+                                if action == 'start':
+                                    data_types = command.get('data_types', {})
+                                    logger.info(f"Recording start command received: {data_types}")
+                                    self._start_selective_recording(data_types)
+
+                                elif action == 'stop':
+                                    logger.info("Recording stop command received")
+                                    self._stop_selective_recording()
 
                         except (json.JSONDecodeError, UnicodeDecodeError) as e:
                             logger.warning(f"Invalid command format: {e}")
@@ -895,6 +1020,43 @@ class BOSEstimator:
                     )
 
                     # ============================================================
+                    # WRITE CoP DATA IF RECORDING ACTIVE
+                    # ============================================================
+                    if self.recording_active and self.recording_data_types.get("cop", False):
+                        if self.recording_writers["cop"]:
+                            from datetime import datetime
+                            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+
+                            # Prepare CoP row
+                            cop_row = [timestamp]
+
+                            # Add local CoPs (up to 2)
+                            for i in range(2):
+                                if i < len(self.all_cops):
+                                    cop_vec, cop_weight = self.all_cops[i]
+                                    cop_flat = cop_vec.flatten()
+                                    cop_row.extend([
+                                        float(cop_flat[0]),
+                                        float(cop_flat[1]),
+                                        float(cop_flat[2]),
+                                        float(cop_weight)
+                                    ])
+                                else:
+                                    cop_row.extend(['', '', '', ''])
+
+                            # Add global CoP
+                            gcop_flat = Gcop.flatten()
+                            cop_row.extend([
+                                float(gcop_flat[0]),
+                                float(gcop_flat[1]),
+                                float(gcop_flat[2]),
+                                float(total_weight)
+                            ])
+
+                            self.recording_writers["cop"].writerow(cop_row)
+                            self.recording_files["cop"].flush()  # Flush to ensure data is written
+
+                    # ============================================================
                     # DEBUG: Verify CoP data is being sent
                     # ============================================================
                     # if not hasattr(self, '_send_counter'):
@@ -918,8 +1080,172 @@ class BOSEstimator:
 
         self.bos_thread_running = False
 
+    def _start_selective_recording(self, data_types: dict):
+        """Start recording selected data types - delegates to mobbo.set_recording_state() pattern"""
+        try:
+            import os
+            from pathlib import Path
+            from datetime import datetime
+            import csv
 
-   
+            # Create trial folder with auto-incrementing trial number
+            # Handle OneDrive and standard Documents paths
+            docs_path = None
+            username = os.getenv('USERNAME', 'User')
+
+            # Try common paths for Documents folder
+            possible_paths = [
+                # OneDrive paths (check custom naming first)
+                Path(f"C:/Users/{username}/OneDrive - Christian Medical College/Documents/MOBBO_Data"),
+                Path(f"C:/Users/{username}/OneDrive/Documents/MOBBO_Data"),
+                # Standard Documents
+                Path.home() / "Documents" / "MOBBO_Data",
+                # Home-based fallback
+                Path.home() / "MOBBO_Data",
+            ]
+
+            logger.info(f"🔍 Searching for valid data path (username: {username})...")
+
+            for potential_docs in possible_paths:
+                try:
+                    logger.debug(f"   Attempting: {potential_docs}")
+                    # Try to create the path directly - if it works, use it
+                    potential_docs.mkdir(parents=True, exist_ok=True)
+                    docs_path = potential_docs
+                    logger.info(f"✅ Successfully using data path: {docs_path}")
+                    break
+                except Exception as e:
+                    logger.debug(f"   ❌ Path failed ({type(e).__name__}): {e}")
+                    continue
+
+            if docs_path is None:
+                # If all fail, this will raise an error so we know something is wrong
+                raise RuntimeError(f"❌ Could not create data folder at any of these paths: {possible_paths}")
+
+            # Verify base path exists (should already exist from loop above)
+            base_path = Path(docs_path)
+            logger.info(f"✅ Base recording path confirmed: {base_path}")
+
+            # Create session folder
+            session_folder = base_path / f"session_{datetime.now().strftime('%Y%m%d')}"
+            try:
+                session_folder.mkdir(parents=True, exist_ok=True)
+                logger.info(f"✅ Session folder created: {session_folder}")
+            except Exception as e:
+                logger.error(f"❌ Failed to create session folder {session_folder}: {e}")
+                raise
+
+            # Find next trial number
+            trial_num = 1
+            try:
+                existing_trials = [d.name for d in session_folder.iterdir() if d.is_dir() and d.name.startswith("trial_")]
+                logger.debug(f"Existing trials in session: {existing_trials}")
+
+                if existing_trials:
+                    trial_nums = []
+                    for t in existing_trials:
+                        # Trial folder format: trial_N_YYYYMMDD_HHMMSS
+                        parts = t.split('_')
+                        if len(parts) >= 2 and parts[1].isdigit():
+                            trial_num_candidate = int(parts[1])
+                            trial_nums.append(trial_num_candidate)
+                            logger.debug(f"  Found trial: {t} -> trial number {trial_num_candidate}")
+
+                    if trial_nums:
+                        trial_num = max(trial_nums) + 1
+                        logger.info(f"✅ Next trial number: {trial_num} (max existing: {max(trial_nums)})")
+                    else:
+                        trial_num = 1
+                        logger.info(f"✅ No valid trial numbers found, starting with trial 1")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not find existing trials: {e}")
+                trial_num = 1
+
+            # Create trial folder
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.recording_trial_path = session_folder / f"trial_{trial_num}_{timestamp}"
+            try:
+                self.recording_trial_path.mkdir(parents=True, exist_ok=True)
+                logger.info(f"✅ Trial folder created: {self.recording_trial_path}")
+                logger.info(f"   Full path: {str(self.recording_trial_path)}")
+            except Exception as e:
+                logger.error(f"❌ Failed to create trial folder {self.recording_trial_path}: {e}")
+                raise
+
+            # Update recording state locally
+            self.recording_active = True
+            self.recording_data_types = data_types.copy()
+
+            # ============================================================
+            # DELEGATE TO MOBBO FOR COP RECORDING (using existing pattern)
+            # ============================================================
+            self.mobbo.set_recording_state(True, str(self.recording_trial_path), data_types)
+            logger.info(f"✅ Called mobbo.set_recording_state(True, ..., {data_types})")
+
+            # Create CSV files for BoS data (not handled by mobbo)
+            if data_types.get("bos", False):
+                bos_path = self.recording_trial_path / "bos_data.csv"
+                self.recording_files["bos"] = open(str(bos_path), 'w', newline='')
+                self.recording_writers["bos"] = csv.writer(self.recording_files["bos"])
+                # Header
+                self.recording_writers["bos"].writerow([
+                    "timestamp",
+                    "left_foot_points", "right_foot_points"
+                ])
+                logger.info(f"✅ BoS recording started: {bos_path}")
+
+            # Create CSV files for Angles data
+            if data_types.get("angles", False):
+                angles_path = self.recording_trial_path / "angles_data.csv"
+                self.recording_files["angles"] = open(str(angles_path), 'w', newline='')
+                self.recording_writers["angles"] = csv.writer(self.recording_files["angles"])
+                # Header
+                self.recording_writers["angles"].writerow([
+                    "timestamp",
+                    "right_elbow", "left_elbow", "right_shoulder", "left_shoulder",
+                    "right_knee", "left_knee", "right_foot", "left_foot"
+                ])
+                logger.info(f"✅ Joint angles recording started: {angles_path}")
+
+            logger.info(f"✅ Recording trial CREATED using mobbo.set_recording_state(): {self.recording_trial_path}")
+
+        except Exception as e:
+            logger.error(f"Failed to start recording: {e}")
+            self.recording_active = False
+
+    def _stop_selective_recording(self):
+        """Stop recording and close all CSV files"""
+        try:
+            self.recording_active = False
+
+            # ============================================================
+            # DELEGATE TO MOBBO TO STOP COP RECORDING (using existing pattern)
+            # ============================================================
+            if self.recording_trial_path:
+                self.mobbo.set_recording_state(False, str(self.recording_trial_path))
+                logger.info(f"✅ Called mobbo.set_recording_state(False, ...)")
+
+            # Close BoS recording files
+            if self.recording_files["bos"]:
+                self.recording_files["bos"].close()
+                self.recording_files["bos"] = None
+                self.recording_writers["bos"] = None
+                logger.info(f"✅ BOS recording stopped and file closed")
+
+            # Close Angles recording files
+            if self.recording_files["angles"]:
+                self.recording_files["angles"].close()
+                self.recording_files["angles"] = None
+                self.recording_writers["angles"] = None
+                logger.info(f"✅ ANGLES recording stopped and file closed")
+
+            logger.info(f"📁 Recording saved at: {self.recording_trial_path}")
+            self.recording_trial_path = None
+
+        except Exception as e:
+            logger.error(f"Error stopping recording: {e}")
+
+
     def foot_shape_get_numpy_and_scatter_points(self, foot_keys, right_heel, 
                                                 right_toe, left_heel, left_toe):
         """
@@ -971,6 +1297,27 @@ class BOSEstimator:
             # Only send if at least one foot is valid
             if left_foot_clean is not None or right_foot_clean is not None:
                 self.godot_bridge.update_BoS_data(bos_data)
+
+                # ============================================================
+                # WRITE BoS DATA IF RECORDING ACTIVE
+                # ============================================================
+                if self.recording_active and self.recording_data_types.get("bos", False):
+                    if self.recording_writers["bos"]:
+                        from datetime import datetime
+                        import json
+                        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+
+                        # Convert foot points to JSON strings
+                        left_foot_json = json.dumps(left_foot_clean) if left_foot_clean else ""
+                        right_foot_json = json.dumps(right_foot_clean) if right_foot_clean else ""
+
+                        self.recording_writers["bos"].writerow([
+                            timestamp,
+                            left_foot_json,
+                            right_foot_json
+                        ])
+                        self.recording_files["bos"].flush()
+
                 # Optional: Add debug counter if needed
                 # if not hasattr(self, '_bos_send_counter'):
                 #     self._bos_send_counter = 0
@@ -1134,6 +1481,30 @@ class BOSEstimator:
                        # Only send if valid
                         if fbp_data['keypoints_3d'] is not None:
                             self.godot_bridge.update_FBP_data(fbp_data)
+
+                        # ============================================================
+                        # WRITE JOINT ANGLES DATA IF RECORDING ACTIVE
+                        # ============================================================
+                        if self.recording_active and self.recording_data_types.get("angles", False):
+                            if self.recording_writers["angles"]:
+                                from datetime import datetime
+                                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+
+                                # Extract 8 angles from keypoint_angle array
+                                angle_row = [timestamp]
+                                for i in range(8):
+                                    if i < keypoint_angle.size:
+                                        angle_val = keypoint_angle[i, 0]
+                                        # Write angle value or empty string if NaN
+                                        if np.isnan(angle_val):
+                                            angle_row.append('')
+                                        else:
+                                            angle_row.append(float(angle_val))
+                                    else:
+                                        angle_row.append('')
+
+                                self.recording_writers["angles"].writerow(angle_row)
+                                self.recording_files["angles"].flush()
 
                         desired_keypoints = [
                             'head', 'neck', 'right_shoulder', 'left_shoulder',
