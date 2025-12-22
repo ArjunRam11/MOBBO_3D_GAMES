@@ -40,7 +40,10 @@ class MobboData:
 
         # Message counter for reduced verbosity
         self._message_counters = {}
-        
+
+        # Data recording types
+        self.data_types = {"cop": True, "bos": True, "angles": True}
+
         # # Create base folder for storing CSV files
         # base_path = os.getcwd()
         # self.cop_data_folder = os.path.join(base_path, "Cop_Data")
@@ -115,30 +118,27 @@ class MobboData:
                     sys.stdout.flush()
                     current_time = time.time()
                     if is_recording:
-                        if  board_save:
+                        if board_save:
                             self.record_board_data()
-                            board_save=False
-                           
-                        if addr not in csv_files:
-                          
-                            self.start_recording(addr)
+                            board_save = False
 
-                        if  foot_point_save:
+                        # Only record CoP data if selected
+                        if self.data_types.get("cop", False):
+                            if addr not in csv_files:
+                                self.start_recording(addr)
+
+                        if foot_point_save:
                             self.foot_recorder.start(path)
-                            foot_point_save= False
+                            foot_point_save = False
 
-                        
-                         
-                         
-                             
                     elif addr in csv_files:
+                        # for addr in list(csv_files.keys()):
+                        self.stop_recording(addr)
+                        self.foot_recorder.stop()
 
-                            # for addr in list(csv_files.keys()):
-                                self.stop_recording(addr)
-                                self.foot_recorder.stop()
-                    
-                    if addr in csv_writers:
-                        csv_writers[addr].writerow([current_time,f1, f2, f3, f4, copx, copy, w, w_sync])
+                    # Write CoP data to CSV if recording is enabled for this data type
+                    if addr in csv_writers and self.data_types.get("cop", False):
+                        csv_writers[addr].writerow([current_time, f1, f2, f3, f4, copx, copy, w, w_sync])
 
                     
                     
@@ -211,16 +211,31 @@ class MobboData:
     def set_board_data(self,board_position):
         self.board_position=board_position
      
-    def set_recording_state(self, state,trial_path):
+    def set_recording_state(self, state, trial_path, data_types=None):
         """
         Update the recording state and create a new CSV file when resuming recording.
+
+        Args:
+            state: True to start recording, False to stop
+            trial_path: Path where trial data should be saved
+            data_types: Dict with keys "cop", "bos", "angles" indicating which data types to record
         """
-        global is_recording,path,board_save,foot_point_save
-         
+        global is_recording, path, board_save, foot_point_save
+
         is_recording = state
-        path=trial_path
-        board_save=True
-        foot_point_save=True
+        path = trial_path
+
+        # Update data types if provided
+        if data_types is not None:
+            self.data_types = data_types.copy()
+
+        if state:
+            board_save = True
+            foot_point_save = True
+        else:
+            # Reset flags when stopping recording
+            board_save = False
+            foot_point_save = False
         # self.record_board_data()
 
     def set_foot_points(self,left_points,right_points):

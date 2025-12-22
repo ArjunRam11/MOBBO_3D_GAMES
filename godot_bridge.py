@@ -2,6 +2,7 @@
 Godot Bridge Module
 Sends Global Center of Pressure (GCoP) data to Godot game engine in real-time
 Supports both JSON and binary float32 formats
+FIXED VERSION - Working CoP/GCoP/FBP with Reset Command Support
 """
 
 import socket
@@ -177,13 +178,12 @@ class GodotBridge:
         self.stop()
         self.sock.close()
 
-"""
-Updated GodotBridgeHelper with optimized board pose sending
-Only sends board pose initially and when configuration changes
-"""
 
 class GodotBridgeHelper:
-    """Helper class to integrate GodotBridge with BOSEstimator - DUAL UDP PORT VERSION"""
+    """
+    FIXED Helper class to integrate GodotBridge with BOSEstimator
+    Dual UDP Port Version with simplified data structure for compatibility
+    """
 
     def __init__(self, gcop_array, data_lock, godot_ip="127.0.0.1", godot_port=8000,
                  godot_port_camera=8001, data_format="json"):
@@ -202,7 +202,7 @@ class GodotBridgeHelper:
         self.data_lock = data_lock
         self.total_weight = 0.0
 
-        # Store local CoPs and global CoP separately
+        # FIXED: Use simpler structure like version 3/4
         self.local_cops = []  # List of local CoP dictionaries
         self.gcop = None      # Global CoP dictionary
 
@@ -217,19 +217,18 @@ class GodotBridgeHelper:
         self.send_board_pose_next = False
 
         # Create PRIMARY bridge for CoP + Board Pose (high frequency)
-        self.bridge = GodotBridge(godot_ip, godot_port, data_format=data_format)
+        # send_rate=0.005 = 200Hz - Fast enough for smooth real-time
+        self.bridge = GodotBridge(godot_ip, godot_port, data_format=data_format, send_rate=0.005)
         self.bridge.set_data_callback(self._get_cop_data)
 
         # Create SECONDARY bridge for FBP + BoS (camera frequency)
-        self.bridge_camera = GodotBridge(godot_ip, godot_port_camera, data_format=data_format, send_rate=0.033)
+        # send_rate=0.008 = 125Hz - Fast enough for smooth FBP animation
+        self.bridge_camera = GodotBridge(godot_ip, godot_port_camera, data_format=data_format, send_rate=0.008)
         self.bridge_camera.set_data_callback(self._get_camera_data)
 
         # ============================================================
         # COMMAND RECEPTION FROM GODOT
         # ============================================================
-        # This simulates a "network_manager" object for Godot command communication
-        # Godot's BoardSetup.gd uses set_meta("reset_board_requested", true)
-        # We store it here for Python to detect
         self.network_manager = type('NetworkManager', (), {})()
         self.network_manager.reset_board_requested = False
         self.network_manager.control_command = {}
@@ -245,21 +244,30 @@ class GodotBridgeHelper:
         if not board_data:
             return 0
         
-        boards = board_data.get('data', {}).get('boards', {})
+        # FIXED: Handle both old structure (with "data" wrapper) and new structure
+        if "data" in board_data:
+            boards = board_data.get('data', {}).get('boards', {})
+            ref_id = board_data.get('data', {}).get('reference_id', -1)
+        else:
+            boards = board_data.get('boards', {})
+            ref_id = board_data.get('reference_id', -1)
+        
         board_ids = tuple(sorted([int(bid) for bid in boards.keys()]))
-        ref_id = board_data.get('data', {}).get('reference_id', -1)
         
         return hash((ref_id, board_ids))
 
     def _get_cop_data(self) -> Optional[dict]:
-        """Callback for PRIMARY UDP port (8000) - CoP + Board Pose only"""
+        """
+        FIXED: Callback for PRIMARY UDP port (8000) - CoP + Board Pose only
+        Uses SIMPLIFIED data structure like version 3/4
+        """
         try:
             with self.data_lock:
                 data = {
                     "timestamp": time.time()
                 }
 
-                # Add CoP data (both local and global)
+                # FIXED: Add CoP data WITHOUT extra "type" wrapper
                 if self.local_cops or self.gcop:
                     cop_data = {}
 
@@ -272,11 +280,16 @@ class GodotBridgeHelper:
                         cop_data["gcop"] = self.gcop
 
                     if cop_data:
-                        data["cop"] = cop_data
+                        data["cop"] = cop_data  # Direct nesting, no "type" wrapper
 
-                # Add Board Pose data ONLY if flagged to send
+                # FIXED: Add Board Pose data WITHOUT extra "type" wrapper
                 if self.send_board_pose_next and self.board_pose_data:
-                    data["board_pose"] = self.board_pose_data
+                    # Extract the actual data from the wrapper if it exists
+                    if isinstance(self.board_pose_data, dict) and "data" in self.board_pose_data:
+                        data["board_pose"] = self.board_pose_data["data"]
+                    else:
+                        data["board_pose"] = self.board_pose_data
+                    
                     self.send_board_pose_next = False
                     logger.info("📤 Sending board pose data to Godot (Port 8000)")
 
@@ -288,20 +301,31 @@ class GodotBridgeHelper:
         return None
 
     def _get_camera_data(self) -> Optional[dict]:
-        """Callback for SECONDARY UDP port (8001) - FBP + BoS only"""
+        """
+        FIXED: Callback for SECONDARY UDP port (8001) - FBP + BoS only
+        Uses SIMPLIFIED data structure
+        """
         try:
             with self.data_lock:
                 data = {
                     "timestamp": time.time()
                 }
 
-                # Add BoS data if available
+                # FIXED: Add BoS data WITHOUT extra "type" wrapper
                 if self.bos_data:
-                    data["bos"] = self.bos_data
+                    # Extract the actual data from the wrapper if it exists
+                    if isinstance(self.bos_data, dict) and "data" in self.bos_data:
+                        data["bos"] = self.bos_data["data"]
+                    else:
+                        data["bos"] = self.bos_data
 
-                # Add FBP data if available
+                # FIXED: Add FBP data WITHOUT extra "type" wrapper
                 if self.fbp_data:
-                    data["fbp"] = self.fbp_data
+                    # Extract the actual data from the wrapper if it exists
+                    if isinstance(self.fbp_data, dict) and "data" in self.fbp_data:
+                        data["fbp"] = self.fbp_data["data"]
+                    else:
+                        data["fbp"] = self.fbp_data
 
                 # Only send if we have at least one type of data
                 return data if len(data) > 1 else None
@@ -320,6 +344,7 @@ class GodotBridgeHelper:
             total_weight: Total weight across all sensors
         """
         with self.data_lock:
+            # FIXED: Store directly without "type" wrapper
             self.local_cops = local_cops if local_cops else []
             self.gcop = gcop if gcop else None
             self.total_weight = total_weight
@@ -332,19 +357,20 @@ class GodotBridgeHelper:
         2. First time (never sent before)
         3. Board configuration changed
         """
-        new_board_data = {
-            "type": "board_pose",
-            "data": board_xyz
-        }
-        new_hash = self._calculate_board_pose_hash(new_board_data)
+        # FIXED: Store the data directly without extra wrapper
+        # The wrapper will only be added if needed in _get_cop_data
+        new_board_data = board_xyz
+        new_hash = self._calculate_board_pose_hash({"data": board_xyz} if "boards" in board_xyz else board_xyz)
 
         should_send = force_send
 
         if not force_send:
             if not self.board_pose_sent:
                 should_send = True
+                logger.info("🆕 First board pose data - flagging for send")
             elif new_hash != self.previous_board_pose_hash:
                 should_send = True
+                logger.info("🔄 Board configuration changed - flagging for send")
 
         if should_send:
             self.board_pose_data = new_board_data
@@ -354,17 +380,13 @@ class GodotBridgeHelper:
     
     def update_BoS_data(self, BOS_XYZ):
         """Update BOS data for transmission"""
-        self.bos_data = {
-            "type": "bos",
-            "data": BOS_XYZ
-        }
+        # FIXED: Store directly without extra wrapper
+        self.bos_data = BOS_XYZ
     
     def update_FBP_data(self, FBP_XYZ):
         """Update FBP data for transmission"""
-        self.fbp_data = {
-            "type": "fbp",
-            "data": FBP_XYZ
-        }
+        # FIXED: Store directly without extra wrapper
+        self.fbp_data = FBP_XYZ
 
     def start(self):
         """Start sending to Godot on BOTH UDP ports"""

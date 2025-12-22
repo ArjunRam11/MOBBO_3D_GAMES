@@ -6,7 +6,8 @@
       "Read(//c/Users/Pintu/Downloads/**)",
       "Bash(timeout:*)",
       "Bash(git rm:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(grep:*)"
     ],
     "deny": [],
     "ask": []
