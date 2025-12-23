@@ -838,6 +838,45 @@ class BOSEstimator:
                                         self.bos_thread_running = False
                                         break
 
+                                elif command.get('action') == 'toggle_recording':
+                                    # Handle recording command from Godot UI
+                                    recording_state = command.get('state', False)
+                                    trial_name = command.get('trial_path', '')
+
+                                    print(f"Record command received: state={recording_state}, trial_name={trial_name}")
+                                    logger.info(f"Recording command from Godot: state={recording_state}, trial_name={trial_name}")
+
+                                    try:
+                                        # Create full trial path if starting recording
+                                        if recording_state and trial_name:
+                                            import os
+                                            # Create trial folder in Mobbo_data directory
+                                            base_path = os.path.join(os.getcwd(), "Mobbo_data")
+                                            trial_path = os.path.join(base_path, trial_name)
+
+                                            # Ensure Mobbo_data folder exists
+                                            os.makedirs(base_path, exist_ok=True)
+
+                                            # Create trial-specific folder
+                                            os.makedirs(trial_path, exist_ok=True)
+                                            print(f"✅ Trial folder created: {trial_path}")
+                                        else:
+                                            trial_path = trial_name if trial_name else ""
+
+                                        # Update recording state in MobboData
+                                        if self.mobbo:
+                                            self.mobbo.set_recording_state(recording_state, trial_path)
+                                            if recording_state:
+                                                print(f"✅ Recording started - Trial path: {trial_path}")
+                                            else:
+                                                print(f"✅ Recording stopped")
+                                        else:
+                                            print("⚠️ MobboData not initialized")
+                                            logger.warning("Recording command received but MobboData not initialized")
+                                    except Exception as e:
+                                        print(f"❌ Error handling recording command: {e}")
+                                        logger.error(f"Error handling recording command: {e}")
+
                             except (json.JSONDecodeError, UnicodeDecodeError) as e:
                                 print(f"⚠️ Invalid command format: {e}")  # Debug
                                 logger.warning(f"Invalid command format: {e}")
@@ -1108,6 +1147,7 @@ class BOSEstimator:
 
             # Human keypoints processing
             key_bool = True
+            
             try:
                 if key_bool:
                     processed_frame = image1
