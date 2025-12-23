@@ -1,7 +1,8 @@
 """
-Godot Bridge Module
+Godot Bridge Module - FIXED VERSION with Atomic Replacements
 Sends Global Center of Pressure (GCoP) data to Godot game engine in real-time
 Supports both JSON and binary float32 formats
+NO MORE IN-PLACE MODIFICATIONS - Uses atomic reference replacement
 FIXED VERSION - Working CoP/GCoP/FBP with Reset Command Support
 """
 
@@ -11,6 +12,7 @@ import time
 import threading
 import logging
 import struct
+import copy
 from typing import Optional, Callable
 import numpy as np
 
@@ -34,20 +36,16 @@ class GodotBridge:
         self.godot_ip = godot_ip
         self.godot_port = godot_port
         self.send_rate = send_rate
-        self.data_format = data_format  # "json" or "binary"
+        self.data_format = data_format
 
-        # Create UDP socket
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-        # Thread control
         self._running = False
         self._thread = None
         self._lock = threading.Lock()
 
-        # Data callback (function to get latest Gcop)
         self._data_callback: Optional[Callable] = None
 
-        # Statistics
         self.packets_sent = 0
         self.last_sent_time = 0
         self.connection_status = "Disconnected"
@@ -55,12 +53,7 @@ class GodotBridge:
         logger.info(f"GodotBridge initialized - Target: {godot_ip}:{godot_port} (format: {data_format})")
 
     def set_data_callback(self, callback: Callable):
-        """
-        Set callback function to get Gcop data
-
-        Args:
-            callback: Function that returns (gcop_x, gcop_y, gcop_z, total_weight)
-        """
+        """Set callback function to get Gcop data"""
         with self._lock:
             self._data_callback = callback
 
@@ -88,7 +81,6 @@ class GodotBridge:
         """Main loop for sending data to Godot"""
         while self._running:
             try:
-                # Get data from callback
                 if self._data_callback:
                     data = self._data_callback()
                     if data:
@@ -101,37 +93,25 @@ class GodotBridge:
                 time.sleep(0.1)
 
     def _send_data(self, data: dict):
-        """
-        Send data packet to Godot
-
-        Args:
-            data: Dictionary containing gcop_x, gcop_y, gcop_z, weight, etc.
-        """
+        """Send data packet to Godot"""
         try:
             if self.data_format == "json":
-                # JSON format (for new implementations)
                 json_data = json.dumps(data)
                 packet = json_data.encode('utf-8')
 
-            else:  # binary format (for existing NOARK games)
-                # Pack as float32 array: [message_code, x, y, z]
-                # message_code: 2.0 = connected/sending data
+            else:  # binary format
                 message_code = 2.0
                 x = float(data.get('x', 0.0))
                 y = float(data.get('y', 0.0))
                 z = float(data.get('z', 0.0))
 
-                # Pack as 4 float32 values (16 bytes total)
                 packet = struct.pack('4f', message_code, x, y, z)
 
-            # Send via UDP
             self.sock.sendto(packet, (self.godot_ip, self.godot_port))
 
-            # Update statistics
             self.packets_sent += 1
             self.last_sent_time = time.time()
 
-            # Log periodically (every 100 packets)
             if self.packets_sent % 100 == 0:
                 logger.debug(f"Sent packet #{self.packets_sent} to Godot: {data}")
 
@@ -140,16 +120,7 @@ class GodotBridge:
 
     def send_single_packet(self, gcop_x: float, gcop_y: float, gcop_z: float = 0.0,
                           weight: float = 0.0, **kwargs):
-        """
-        Send a single data packet (useful for testing or manual control)
-
-        Args:
-            gcop_x: Global CoP X coordinate
-            gcop_y: Global CoP Y coordinate
-            gcop_z: Global CoP Z coordinate (default: 0)
-            weight: Total weight on sensors
-            **kwargs: Additional data to send
-        """
+        """Send a single data packet"""
         data = {
             "type": "gcop",
             "x": float(gcop_x),
@@ -181,70 +152,57 @@ class GodotBridge:
 
 class GodotBridgeHelper:
     """
-    FIXED Helper class to integrate GodotBridge with BOSEstimator
-    Dual UDP Port Version with simplified data structure for compatibility
+    FIXED Helper class - Uses ATOMIC REPLACEMENTS instead of in-place modifications
+    This prevents race conditions with Godot reading data mid-modification
     """
 
     def __init__(self, gcop_array, data_lock, godot_ip="127.0.0.1", godot_port=8000,
                  godot_port_camera=8001, data_format="json"):
-        """
-        Initialize helper with DUAL UDP ports
-
-        Args:
-            gcop_array: Reference to global gcop1 array
-            data_lock: Threading lock for safe access
-            godot_ip: Godot IP address
-            godot_port: UDP port for high-frequency data (CoP, Board Pose) - default 8000
-            godot_port_camera: UDP port for camera data (FBP, BoS) - default 8001
-            data_format: "json" or "binary" (default: "json")
-        """
+        """Initialize helper with DUAL UDP ports"""
         self.gcop_array = gcop_array
         self.data_lock = data_lock
         self.total_weight = 0.0
 
-        # FIXED: Use simpler structure like version 3/4
-        self.local_cops = []  # List of local CoP dictionaries
-        self.gcop = None      # Global CoP dictionary
+        # CRITICAL: Initialize as IMMUTABLE empty objects (will be replaced, not modified)
+        self.local_cops = []
+        self.gcop = {}
+        self.board_pose_data = {}
 
-        # Store all other data types
-        self.board_pose_data = None
-        self.bos_data = None
-        self.fbp_data = None
+        # FIXED: Use flat arrays instead of nested dicts (Option A)
+        self.fbp_points = [None] * 18      # Array of 18 individual keypoints
+        self.bos_left_points = []          # Dynamic array for left foot points
+        self.bos_right_points = []         # Dynamic array for right foot points
 
-        # Board pose change tracking
+        # Legacy attributes for backward compatibility (deprecated)
+        self.bos_data = {}
+        self.fbp_data = {}
+
         self.board_pose_sent = False
         self.previous_board_pose_hash = None
         self.send_board_pose_next = False
 
-        # Create PRIMARY bridge for CoP + Board Pose (high frequency)
-        # send_rate=0.005 = 200Hz - Fast enough for smooth real-time
+        # Create PRIMARY bridge for CoP + Board Pose
         self.bridge = GodotBridge(godot_ip, godot_port, data_format=data_format, send_rate=0.005)
         self.bridge.set_data_callback(self._get_cop_data)
 
-        # Create SECONDARY bridge for FBP + BoS (camera frequency)
-        # send_rate=0.008 = 125Hz - Fast enough for smooth FBP animation
+        # Create SECONDARY bridge for FBP + BoS
         self.bridge_camera = GodotBridge(godot_ip, godot_port_camera, data_format=data_format, send_rate=0.008)
         self.bridge_camera.set_data_callback(self._get_camera_data)
 
-        # ============================================================
-        # COMMAND RECEPTION FROM GODOT
-        # ============================================================
         self.network_manager = type('NetworkManager', (), {})()
         self.network_manager.reset_board_requested = False
         self.network_manager.control_command = {}
         self.network_manager.recording_command = {}
 
-        logger.info(f"🎮 Dual UDP Bridge initialized:")
-        logger.info(f"   Port {godot_port}: CoP + Board Pose (high frequency)")
-        logger.info(f"   Port {godot_port_camera}: FBP + BoS (camera frequency)")
-        logger.info(f"   Command reception: Enabled (reset_board_requested flag)")
+        logger.info(f"🎮 Dual UDP Bridge initialized (ATOMIC MODE):")
+        logger.info(f"   Port {godot_port}: CoP + Board Pose")
+        logger.info(f"   Port {godot_port_camera}: FBP + BoS")
 
     def _calculate_board_pose_hash(self, board_data: dict) -> int:
-        """Calculate a hash of the board pose data to detect changes."""
+        """Calculate hash of board pose data"""
         if not board_data:
             return 0
         
-        # FIXED: Handle both old structure (with "data" wrapper) and new structure
         if "data" in board_data:
             boards = board_data.get('data', {}).get('boards', {})
             ref_id = board_data.get('data', {}).get('reference_id', -1)
@@ -257,43 +215,35 @@ class GodotBridgeHelper:
         return hash((ref_id, board_ids))
 
     def _get_cop_data(self) -> Optional[dict]:
-        """
-        FIXED: Callback for PRIMARY UDP port (8000) - CoP + Board Pose only
-        Uses SIMPLIFIED data structure like version 3/4
-        """
+        """Callback for PRIMARY UDP port - CoP + Board Pose"""
         try:
             with self.data_lock:
                 data = {
                     "timestamp": time.time()
                 }
 
-                # FIXED: Add CoP data WITHOUT extra "type" wrapper
+                # ATOMIC READ: Get immutable references
                 if self.local_cops or self.gcop:
                     cop_data = {}
 
-                    # Add local CoPs if available
                     if self.local_cops:
                         cop_data["local_cops"] = self.local_cops
 
-                    # Add global CoP if available
                     if self.gcop:
                         cop_data["gcop"] = self.gcop
 
                     if cop_data:
-                        data["cop"] = cop_data  # Direct nesting, no "type" wrapper
+                        data["cop"] = cop_data
 
-                # FIXED: Add Board Pose data WITHOUT extra "type" wrapper
                 if self.send_board_pose_next and self.board_pose_data:
-                    # Extract the actual data from the wrapper if it exists
                     if isinstance(self.board_pose_data, dict) and "data" in self.board_pose_data:
                         data["board_pose"] = self.board_pose_data["data"]
                     else:
                         data["board_pose"] = self.board_pose_data
                     
                     self.send_board_pose_next = False
-                    logger.info("📤 Sending board pose data to Godot (Port 8000)")
+                    logger.info("📤 Sending board pose data to Godot")
 
-                # Only send if we have at least one type of data
                 return data if len(data) > 1 else None
 
         except Exception as e:
@@ -301,33 +251,31 @@ class GodotBridgeHelper:
         return None
 
     def _get_camera_data(self) -> Optional[dict]:
-        """
-        FIXED: Callback for SECONDARY UDP port (8001) - FBP + BoS only
-        Uses SIMPLIFIED data structure
-        """
+        """Callback for SECONDARY UDP port - FBP + BoS (FIXED - Option A)"""
         try:
             with self.data_lock:
                 data = {
                     "timestamp": time.time()
                 }
 
-                # FIXED: Add BoS data WITHOUT extra "type" wrapper
-                if self.bos_data:
-                    # Extract the actual data from the wrapper if it exists
-                    if isinstance(self.bos_data, dict) and "data" in self.bos_data:
-                        data["bos"] = self.bos_data["data"]
-                    else:
-                        data["bos"] = self.bos_data
+                # FIXED: Send flat arrays instead of nested dicts (no race condition!)
 
-                # FIXED: Add FBP data WITHOUT extra "type" wrapper
-                if self.fbp_data:
-                    # Extract the actual data from the wrapper if it exists
-                    if isinstance(self.fbp_data, dict) and "data" in self.fbp_data:
-                        data["fbp"] = self.fbp_data["data"]
-                    else:
-                        data["fbp"] = self.fbp_data
+                # FBP: Check if ANY point is valid
+                fbp_has_valid = any(p is not None for p in self.fbp_points)
+                if fbp_has_valid:
+                    # Send all 18 points as flat array
+                    fbp_array = list(self.fbp_points)  # Shallow copy is fine for list of values
+                    data["fbp"] = {"keypoints": fbp_array}
 
-                # Only send if we have at least one type of data
+                # BoS: Check if ANY point is valid
+                bos_has_valid = (len(self.bos_left_points) > 0 or
+                                len(self.bos_right_points) > 0)
+                if bos_has_valid:
+                    data["bos"] = {
+                        "left_foot": list(self.bos_left_points),
+                        "right_foot": list(self.bos_right_points)
+                    }
+
                 return data if len(data) > 1 else None
 
         except Exception as e:
@@ -336,30 +284,18 @@ class GodotBridgeHelper:
 
     def update_cop_data(self, local_cops: list, gcop: dict, total_weight: float):
         """
-        Update CoP data for transmission (both local and global)
-        
-        Args:
-            local_cops: List of local CoP dictionaries [{'x': ..., 'y': ..., 'z': ..., 'weight': ...}, ...]
-            gcop: Global CoP dictionary {'x': ..., 'y': ..., 'z': ..., 'weight': ...}
-            total_weight: Total weight across all sensors
+        Update CoP data - ATOMIC REPLACEMENT
+        Creates new objects instead of modifying existing ones
         """
         with self.data_lock:
-            # FIXED: Store directly without "type" wrapper
-            self.local_cops = local_cops if local_cops else []
-            self.gcop = gcop if gcop else None
+            # CRITICAL FIX: Replace entire reference atomically
+            # Godot's old reference remains valid while we create new one
+            self.local_cops = copy.deepcopy(local_cops) if local_cops else []
+            self.gcop = copy.deepcopy(gcop) if gcop else {}
             self.total_weight = total_weight
     
     def update_Boardpose_data(self, board_xyz, force_send=False):
-        """
-        Update Board pose data for transmission.
-        Flags for sending if:
-        1. force_send=True (used after board reset)
-        2. First time (never sent before)
-        3. Board configuration changed
-        """
-        # FIXED: Store the data directly without extra wrapper
-        # The wrapper will only be added if needed in _get_cop_data
-        new_board_data = board_xyz
+        """Update Board pose data - ATOMIC REPLACEMENT"""
         new_hash = self._calculate_board_pose_hash({"data": board_xyz} if "boards" in board_xyz else board_xyz)
 
         should_send = force_send
@@ -367,40 +303,76 @@ class GodotBridgeHelper:
         if not force_send:
             if not self.board_pose_sent:
                 should_send = True
-                logger.info("🆕 First board pose data - flagging for send")
+                logger.info("🆕 First board pose data")
             elif new_hash != self.previous_board_pose_hash:
                 should_send = True
-                logger.info("🔄 Board configuration changed - flagging for send")
+                logger.info("🔄 Board configuration changed")
 
         if should_send:
-            self.board_pose_data = new_board_data
-            self.send_board_pose_next = True
-            self.previous_board_pose_hash = new_hash
-            self.board_pose_sent = True
+            with self.data_lock:
+                # CRITICAL FIX: Replace entire reference atomically
+                self.board_pose_data = copy.deepcopy(board_xyz)
+                self.send_board_pose_next = True
+                self.previous_board_pose_hash = new_hash
+                self.board_pose_sent = True
     
     def update_BoS_data(self, BOS_XYZ):
-        """Update BOS data for transmission"""
-        # FIXED: Store directly without extra wrapper
-        self.bos_data = BOS_XYZ
-    
+        """Update BOS data - ATOMIC REPLACEMENT"""
+        with self.data_lock:
+            # CRITICAL FIX: Replace entire reference atomically
+            self.bos_data = copy.deepcopy(BOS_XYZ) if isinstance(BOS_XYZ, dict) else {}
+
     def update_FBP_data(self, FBP_XYZ):
-        """Update FBP data for transmission"""
-        # FIXED: Store directly without extra wrapper
-        self.fbp_data = FBP_XYZ
+        """Update FBP data - ATOMIC REPLACEMENT (DEPRECATED - use update_FBP_points_batch)"""
+        with self.data_lock:
+            # CRITICAL FIX: Replace entire reference atomically
+            self.fbp_data = copy.deepcopy(FBP_XYZ) if isinstance(FBP_XYZ, dict) else {}
+
+    def update_FBP_points_batch(self, keypoints_list):
+        """
+        Update all FBP points at once from a list (FIXED - Option A).
+
+        Args:
+            keypoints_list: List of dicts with {'x': float, 'y': float, 'z': float} or None
+                           Should be 18 keypoints for MediaPipe
+        """
+        with self.data_lock:
+            if keypoints_list:
+                # Update each individual point atomically
+                for i in range(min(len(keypoints_list), 18)):
+                    kp = keypoints_list[i]
+                    self.fbp_points[i] = copy.deepcopy(kp) if kp else None
+
+                # Clear remaining slots
+                for i in range(len(keypoints_list), 18):
+                    self.fbp_points[i] = None
+            else:
+                # Clear all points
+                self.fbp_points = [None] * 18
+
+    def update_BoS_points(self, left_foot_list, right_foot_list):
+        """
+        Update BoS points as flat arrays (FIXED - Option A).
+
+        Args:
+            left_foot_list: List of [x, y, z] arrays for left foot polygon
+            right_foot_list: List of [x, y, z] arrays for right foot polygon
+        """
+        with self.data_lock:
+            self.bos_left_points = copy.deepcopy(left_foot_list) if left_foot_list else []
+            self.bos_right_points = copy.deepcopy(right_foot_list) if right_foot_list else []
 
     def start(self):
         """Start sending to Godot on BOTH UDP ports"""
-        self.bridge.start()  # Port 8000: CoP + Board Pose
-        self.bridge_camera.start()  # Port 8001: FBP + BoS
-        logger.info("✅ GodotBridgeHelper started (Dual UDP)")
-        logger.info("   Port 8000: Sending CoP + Board Pose")
-        logger.info("   Port 8001: Sending FBP + BoS")
+        self.bridge.start()
+        self.bridge_camera.start()
+        logger.info("✅ GodotBridgeHelper started (ATOMIC MODE)")
 
     def stop(self):
-        """Stop sending to Godot on BOTH UDP ports"""
+        """Stop sending to Godot"""
         self.bridge.stop()
         self.bridge_camera.stop()
-        logger.info("🛑 GodotBridgeHelper stopped (both ports)")
+        logger.info("🛑 GodotBridgeHelper stopped")
 
     def get_status(self):
         """Get status"""
@@ -408,7 +380,7 @@ class GodotBridgeHelper:
         status['board_pose_sent'] = self.board_pose_sent
         status['board_pose_hash'] = self.previous_board_pose_hash
         status['local_cops_count'] = len(self.local_cops)
-        status['has_gcop'] = self.gcop is not None
+        status['has_gcop'] = bool(self.gcop)
         return status
 
 
@@ -416,16 +388,12 @@ if __name__ == "__main__":
     """Test the Godot Bridge"""
     logging.basicConfig(level=logging.INFO)
 
-    # Create test bridge
     bridge = GodotBridge(godot_ip="127.0.0.1", godot_port=8000)
 
-    # Test sending data
     print("Starting Godot Bridge test...")
     bridge.start()
 
-    # Simulate sending CoP data for 5 seconds
     for i in range(50):
-        # Simulate CoP movement in a circle
         t = i * 0.1
         x = 0.1 * np.cos(t)
         y = 0.1 * np.sin(t)

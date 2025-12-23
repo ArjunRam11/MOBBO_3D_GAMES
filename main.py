@@ -59,37 +59,42 @@ from godot_bridge import GodotBridgeHelper
 
 def sanitize_fbp_data(keypoints_3d):
     """
-    Sanitize FBP keypoints to ensure Godot-safe data
-    
+    Convert FBP keypoints to dictionary point format for Godot visualization.
+
     Args:
-        keypoints_3d: numpy array of shape (N, 3)
-    
+        keypoints_3d: numpy array of shape (N, 3) or (18, 3)
+
     Returns:
-        List of lists with None for invalid values
+        List of 18 point dictionaries: [{'x': x, 'y': y, 'z': z}, ...]
+        Missing keypoints are included as None entries to maintain 18-element array
     """
     if keypoints_3d is None:
         return None
-    
-    if isinstance(keypoints_3d, np.ndarray):
-        # Check if all NaN
-        if np.all(np.isnan(keypoints_3d)):
-            return None
-        
-        sanitized = []
-        for row in keypoints_3d:
-            if len(row) >= 3:
-                x = None if np.isnan(row[0]) else float(row[0])
-                y = None if np.isnan(row[1]) else float(row[1])
-                z = None if np.isnan(row[2]) else float(row[2])
-                
-                # Only add if at least one coordinate is valid
-                if x is not None or y is not None or z is not None:
-                    sanitized.append([x, y, z])
-        
-        # Need at least 3 valid keypoints
-        return sanitized if len(sanitized) >= 3 else None
-    
-    return None
+
+    if not isinstance(keypoints_3d, np.ndarray):
+        return None
+
+    # Check if all NaN
+    if np.all(np.isnan(keypoints_3d)):
+        return None
+
+    # Convert to list of dictionaries, maintaining all 18 keypoints
+    fbp_points = []
+    for row in keypoints_3d:
+        if len(row) >= 3:
+            x = None if np.isnan(row[0]) else float(row[0])
+            y = None if np.isnan(row[1]) else float(row[1])
+            z = None if np.isnan(row[2]) else float(row[2])
+
+            # Convert to dict format, even if all coords are None (missing keypoint)
+            if x is not None or y is not None or z is not None:
+                fbp_points.append({'x': x, 'y': y, 'z': z})
+            else:
+                # Missing keypoint - use None as placeholder
+                fbp_points.append(None)
+
+    # Return only if we have at least some valid keypoints
+    return fbp_points if any(pt is not None for pt in fbp_points) else None
 
 
 def sanitize_for_json(data):
@@ -979,21 +984,18 @@ class BOSEstimator:
             )
 
             # ============================================================
-            # FIXED: SEND BoS DATA TO GODOT BRIDGE
+            # FIXED: SEND BoS DATA TO GODOT BRIDGE (Option A - Flat Arrays)
             # ============================================================
             # Validate and clean polygon data before sending
             left_foot_clean = validate_polygon_data(self.foot_numpy_points[1])
             right_foot_clean = validate_polygon_data(self.foot_numpy_points[0])
-            
-            # FIXED: Simple structure (no "type" wrapper)
-            bos_data = {
-                'left_foot': left_foot_clean,  # Already validated, will be None if invalid
-                'right_foot': right_foot_clean  # Already validated, will be None if invalid
-            }
-            
-            # Only send if at least one foot is valid
+
+            # FIXED: Send as flat arrays instead of nested dict (no race condition!)
             if left_foot_clean is not None or right_foot_clean is not None:
-                self.godot_bridge.update_BoS_data(bos_data)
+                self.godot_bridge.update_BoS_points(
+                    left_foot_clean,
+                    right_foot_clean
+                )
 
     def run_aruco(self, visualizer, w, h, mat, dist, frame):
         """
@@ -1135,14 +1137,12 @@ class BOSEstimator:
                         with data_lock:
                             angles[:] = keypoint_angle
 
-                        # FIXED: Simple FBP data structure (no "type" wrapper)
-                        fbp_data = {
-                            'keypoints_3d': sanitize_fbp_data(keypoints_from_ref_board),
-                        }
+                        # FIXED: Send FBP as flat array instead of nested dict (Option A - no race condition!)
+                        fbp_keypoints = sanitize_fbp_data(keypoints_from_ref_board)
 
                         # Only send if valid
-                        if fbp_data['keypoints_3d'] is not None:
-                            self.godot_bridge.update_FBP_data(fbp_data)
+                        if fbp_keypoints is not None and len(fbp_keypoints) > 0:
+                            self.godot_bridge.update_FBP_points_batch(fbp_keypoints)
 
                         desired_keypoints = [
                             'head', 'neck', 'right_shoulder', 'left_shoulder',
