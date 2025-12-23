@@ -251,30 +251,36 @@ class GodotBridgeHelper:
         return None
 
     def _get_camera_data(self) -> Optional[dict]:
-        """Callback for SECONDARY UDP port - FBP + BoS (FIXED - Option A)"""
+        """Callback for SECONDARY UDP port - FBP + BoS (Individual points like GCOP)"""
         try:
             with self.data_lock:
                 data = {
                     "timestamp": time.time()
                 }
 
-                # FIXED: Send flat arrays instead of nested dicts (no race condition!)
+                # FIXED: Send each FBP point individually (like GCOP) - NO RACE CONDITION!
+                # Each point is a separate variable, no array iteration needed in Godot
 
-                # FBP: Check if ANY point is valid
+                # FBP: Send 18 individual keypoints wrapped in "fbp" key
                 fbp_has_valid = any(p is not None for p in self.fbp_points)
                 if fbp_has_valid:
-                    # Send all 18 points as flat array
-                    fbp_array = list(self.fbp_points)  # Shallow copy is fine for list of values
-                    data["fbp"] = {"keypoints": fbp_array}
+                    fbp_data = {}
+                    # Send each of 18 points individually as fbp_point_0 through fbp_point_17
+                    for i in range(18):
+                        if self.fbp_points[i] is not None:
+                            fbp_data[f"fbp_point_{i}"] = copy.deepcopy(self.fbp_points[i])
+                    data["fbp"] = fbp_data
 
-                # BoS: Check if ANY point is valid
+                # BoS: Keep as atomic arrays (no iteration needed for these)
                 bos_has_valid = (len(self.bos_left_points) > 0 or
                                 len(self.bos_right_points) > 0)
                 if bos_has_valid:
-                    data["bos"] = {
-                        "left_foot": list(self.bos_left_points),
-                        "right_foot": list(self.bos_right_points)
-                    }
+                    bos_data = {}
+                    if self.bos_left_points:
+                        bos_data["left_foot"] = copy.deepcopy(self.bos_left_points)
+                    if self.bos_right_points:
+                        bos_data["right_foot"] = copy.deepcopy(self.bos_right_points)
+                    data["bos"] = bos_data
 
                 return data if len(data) > 1 else None
 
