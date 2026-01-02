@@ -52,9 +52,11 @@ from pyqtlibrary import (
     create_foot_polygon_3d, return_BOS_vectors_singlekeypoint_pyqt
 )
 from noisecancellation import update_buffer
-from COP_wifi_data import MobboData
-import COP_wifi_data  # Import module to access stop_flag_wifi2
+from COP_wifi_data import MobboData, get_mobbo_instance
+import COP_wifi_data  # Import module to access stop_flag_wifi2, is_recording
 from godot_bridge import GodotBridgeHelper
+from board_layout_analyzer import analyze_board_layout, format_layout_for_godot
+from board_pose_json_recorder import record_board_pose_global
 
 
 def sanitize_fbp_data(keypoints_3d):
@@ -427,7 +429,10 @@ class BOSEstimator:
 
     def __init__(self, frame: Frame_Process):
         self.frame = frame
-        self.mobbo = MobboData()
+        # Use the global singleton MobboData instance instead of creating a new one
+        # This ensures all code uses the same instance
+        self.mobbo = get_mobbo_instance()
+        logger.info(f"✅ BOSEstimator using MobboData singleton: {self.mobbo}")
         self.foot_detection_model = foot_detector()
         self.recorder = FootDataRecorder()
 
@@ -485,7 +490,7 @@ class BOSEstimator:
         # Godot Bridge for sending CoP data to game engine
         self.godot_bridge = GodotBridgeHelper(
             gcop_array=gcop1,
-            data_lock=data_lock,
+            data_lock=self.data_lock,
             godot_ip="127.0.0.1",
             godot_port=8000,
             godot_port_camera=8001,
@@ -558,45 +563,82 @@ class BOSEstimator:
 
     def reset_all_threads(self):
         """Restart BOS processing: Re-detect boards and restart ALL threads."""
+        global stop_threads, stop_flag_aruco
+
         try:
+            # CRITICAL FIX: Set flags to True BEFORE starting new threads
+            # (stop_all_threads() set them to False, so new threads would never run)
+            stop_threads = True
+            stop_flag_aruco = True
+            logger.info("🔄 RESET: Flags reset to True - threads will run")
+            print("✅ Flags set to True for thread restart")
+
             # Reset the board_pose_sent flag to force re-send on next detection
             self.godot_bridge.board_pose_sent = False
             self.godot_bridge.previous_board_pose_hash = None
+            print(f"🔄 RESET: board_pose_sent and hash reset")
 
             # Re-detect board positions with NEW reference frame
-            self.board_pose_detected_set(self.frame)
+            logger.info("🔄 RESET: Re-detecting boards after reset...")
+            print(f"🔄 RESET: self.frame type: {type(self.frame)}, is None: {self.frame is None}")
+            if self.frame is None:
+                print("❌ CRITICAL: self.frame is None during reset - cannot re-detect boards!")
+            else:
+                print(f"✅ self.frame available, shape: {self.frame.shape if hasattr(self.frame, 'shape') else 'N/A'}")
 
-            # CRITICAL: Force send the board pose data even if hash unchanged
-            # (board might be in same position but still needs to re-render in Godot)
-            if hasattr(self, '_last_board_xyz_data'):
-                self.godot_bridge.update_Boardpose_data(self._last_board_xyz_data, force_send=True)
+            print("🔄 RESET: Calling board_pose_detected_set()...")
+            self.board_pose_detected_set(self.frame)
+            print("🔄 RESET: board_pose_detected_set() returned")
+            logger.info("🔄 RESET: Board re-detection complete")
+
+            # CRITICAL: The board_pose_detected_set() call above already sent board data and updated _last_board_xyz_data
+            # No need to re-send here - the detection already sent fresh data
+            logger.info("✅ Board data sent during detection")
 
             # Restart the continuous compute_COP thread
             self.bos_thread_running = False
             time.sleep(0.1)  # Give old thread extra time to exit
+            print("⏹️ Stopping old BOS thread")
 
             # Create and start the new BOS thread
-            self.bos_thread = threading.Thread(target=self.compute_COP)
+            print("🔵 Creating new BOS thread...")
+            self.bos_thread = threading.Thread(target=self.compute_COP, name="BOS_Thread_RESET")
+            self.bos_thread.daemon = False
             self.bos_thread.start()
             self.bos_thread_running = True
+            logger.info("🔄 RESET: BOS thread restarted")
+            print("✅ BOS thread restarted successfully")
 
             # CRITICAL: Restart ArUco/camera processing thread for FBP and BoS updates
             # This thread handles foot detection and pose estimation
+            print("🔵 Creating new ArUco thread...")
             self.aruco_thread_ = threading.Thread(
                 target=self.run_aruco,
-                args=(self.visualizer, 1280, 720, MAT, DIST, self.frame)
+                args=(self.visualizer, 1280, 720, MAT, DIST, self.frame),
+                name="ArUco_Thread_RESET"
             )
+            self.aruco_thread_.daemon = False
             self.aruco_thread_.start()
+            logger.info("🔄 RESET: ArUco thread restarted")
+            print("✅ ArUco thread restarted successfully")
+
+            logger.info("✅ RESET: All threads restarted and running")
 
         except Exception as e:
             logger.error(f"Error during reset_all_threads: {e}")
             # Still try to restart the threads even if board detection failed
             try:
+                # CRITICAL: Set flags to True even in exception handler
+                stop_threads = True
+                stop_flag_aruco = True
+                print("✅ Flags set to True in exception handler")
+
                 self.bos_thread_running = False
                 time.sleep(0.1)
                 self.bos_thread = threading.Thread(target=self.compute_COP)
                 self.bos_thread.start()
                 self.bos_thread_running = True
+                print("✅ BOS thread restarted in exception handler")
 
                 # Also restart ArUco thread
                 self.aruco_thread_ = threading.Thread(
@@ -604,6 +646,7 @@ class BOSEstimator:
                     args=(self.visualizer, 1280, 720, MAT, DIST, self.frame)
                 )
                 self.aruco_thread_.start()
+                print("✅ ArUco thread restarted in exception handler")
             except Exception as thread_error:
                 logger.error(f"Failed to restart threads: {thread_error}")
 
@@ -632,8 +675,25 @@ class BOSEstimator:
     def board_pose_detected_set(self, frame):
         global stop_flag_aruco, stop_threads
 
+        print("🔍 board_pose_detected_set() STARTED")
+
+        # Validate frame
+        if frame is None:
+            print("❌ board_pose_detected_set: frame is None - CANNOT PROCEED")
+            logger.error("Cannot detect boards - frame is None")
+            return
+
         frame1 = frame
+        print(f"🔍 Detecting boards from frame shape: {frame1.shape if hasattr(frame1, 'shape') else 'Unknown'}")
+
         board_pose_data = self.board_pose.board_pose(frame1)
+        print(f"🔍 board_pose.board_pose() returned: {len(board_pose_data) if board_pose_data else 0} boards detected")
+
+        if not board_pose_data or len(board_pose_data) == 0:
+            print("❌ No board pose data detected from frame")
+            logger.error("No boards detected - board_pose_data is empty")
+            return
+
         self.board_position_data = board_pose_data
         self.mobbo.set_board_data(self.board_position_data)
         time.sleep(0.5)
@@ -663,11 +723,15 @@ class BOSEstimator:
             translations.append(translation)
             rotation_matrices.append(rotation_matrix)
             ip_addresses.append(board_address)
+            print(f"🔍 Board {i}: IDs={boards_ids}, IP={board_address}")
 
         # Handle case where no boards detected
         if len(translations) == 0:
+            print("❌ No translations extracted from board_pose_data")
             logger.error("No boards detected during board detection")
             return
+
+        print(f"✅ Successfully detected {len(translations)} boards with {len(ids)} total IDs")
 
         distances = [t[2, 0] for t in translations]
         ref_index = np.argmin(distances)  # Closest board as reference
@@ -744,11 +808,81 @@ class BOSEstimator:
                     'relative_translation': self.relative_translations[board_id].flatten().tolist()
                 }
 
+        # ============================================================
+        # ANALYZE BOARD LAYOUT BEFORE SENDING (CRITICAL FIX)
+        # ============================================================
+        # Must analyze layout BEFORE sending board pose to ensure both are synchronized
+        board_layout_data = None
+        try:
+            # Create translations dict for layout analyzer
+            translations_dict = {}
+            for board_id in self.board_translations.keys():
+                translations_dict[int(board_id)] = self.board_translations[board_id]
+
+            # Analyze board layout
+            layout_info = analyze_board_layout(translations_dict)
+
+            # Format for Godot (JSON serializable)
+            board_layout_data = format_layout_for_godot(layout_info)
+
+            logger.info(f"📐 Board layout analyzed: {board_layout_data['layout']} ({board_layout_data['arrangement_type']})")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to analyze board layout: {e}")
+            board_layout_data = None
+
+        # Include board layout in the same data packet as board pose
+        # SIMPLIFIED: Send only the layout string (e.g., "1x2" or "2x1")
+        if board_layout_data:
+            board_xyz_data['board_layout'] = {
+                'layout': board_layout_data.get('layout', 'unknown'),
+                # 'arrangement_type': board_layout_data.get('arrangement_type', 'unknown')
+            }
+        else:
+            logger.warning("⚠️ No board layout data available!")
+
         # Store for reset operations (to force re-send even if unchanged)
         self._last_board_xyz_data = board_xyz_data
 
-        # FIXED: Send to Godot Bridge (no wrapper needed)
+        # DEBUG: Log the exact board data being sent
+        logger.info(f"📤 SENDING BOARD DATA:")
+        logger.info(f"   Reference ID: {board_xyz_data.get('reference_id', 'MISSING')}")
+        logger.info(f"   Boards: {list(board_xyz_data.get('boards', {}).keys())}")
+        logger.info(f"   Has Layout: {'board_layout' in board_xyz_data}")
+        if 'board_layout' in board_xyz_data:
+            layout = board_xyz_data['board_layout']
+            logger.info(f"   Layout: {layout.get('layout', 'UNKNOWN')} ({layout.get('arrangement_type', 'UNKNOWN')})")
+
+        # SEND BOARD POSE + LAYOUT TOGETHER
         self.godot_bridge.update_Boardpose_data(board_xyz_data)
+
+        # Pass board layout to recording system (for JSON file)
+        if board_layout_data and self.mobbo:
+            self.mobbo.set_board_layout(board_layout_data)
+
+        # SAVE BOARD POSE DATA TO JSON IF RECORDING IS ACTIVE
+        if COP_wifi_data.is_recording:
+            try:
+                # Extract board position data from board_xyz_data
+                board_position_list = []
+                boards_data = board_xyz_data.get('boards', {})
+
+                for board_id_str, board_info in boards_data.items():
+                    board_pos = {
+                        "board_translation": board_info.get("relative_translation", [0, 0, 0]),
+                        "ip_address": board_info.get("ip_address", "unknown"),
+                        "angle": board_info.get("angle", 0),
+                        "rotation_matrix": board_info.get("relative_rotation_matrix", []),
+                        "board_aruco_ids": [int(board_id_str)]
+                    }
+                    board_position_list.append(board_pos)
+
+                # Save to JSON using existing recorder
+                json_file = record_board_pose_global(board_position_list)
+                logger.info(f"💾 Board pose saved to JSON: {json_file}")
+                print(f"💾 Board pose saved to: {json_file}")
+            except Exception as e:
+                logger.error(f"❌ Failed to save board pose data: {e}")
+                print(f"❌ Error saving board pose: {e}")
 
         self.previous_board_pose_hash = self._calculate_board_pose_hash(board_xyz_data)
         self.board_pose_sent = True
@@ -761,6 +895,8 @@ class BOSEstimator:
         if not self._initialized:
             self.thread_process_all(frame1)
             self._initialized = True
+
+        print("✅ board_pose_detected_set() COMPLETED")
 
     def _calculate_board_pose_hash(self, board_data: dict) -> int:
         """
@@ -786,205 +922,217 @@ class BOSEstimator:
         return current_hash != self.previous_board_pose_hash
 
     def compute_COP(self):
-        global stop_flag_aruco, stop_threads
+            global stop_flag_aruco, stop_threads
 
-        print("🔵 compute_COP thread started - waiting for commands on port 9000")
-        print(f"🔵 Socket initialized: {self._command_socket is not None}")
-        print(f"🔵 Flag states at start: stop_threads={stop_threads}, stop_flag_aruco={stop_flag_aruco}")
+            print("🔵 compute_COP thread started - waiting for commands on port 9000")
+            print(f"🔵 Socket initialized: {self._command_socket is not None}")
+            print(f"🔵 Flag states at start: stop_threads={stop_threads}, stop_flag_aruco={stop_flag_aruco}")
 
-        loop_count = 0
-        while stop_threads and stop_flag_aruco:
-            loop_count += 1
+            loop_count = 0
+            while stop_threads and stop_flag_aruco:
+                loop_count += 1
 
-            # ============================================================
-            # CHECK FOR RESET COMMAND FROM GODOT VIA UDP PORT 9000 (TRUE NON-BLOCKING)
-            # ============================================================
-            if self._command_socket:
-                try:
-                    # Use select() with 0 timeout - TRUE non-blocking check (no wait)
-                    ready = select.select([self._command_socket], [], [], 0)
+                # ============================================================
+                # CHECK FOR RESET COMMAND FROM GODOT VIA UDP PORT 9000 (TRUE NON-BLOCKING)
+                # ============================================================
+                if self._command_socket:
+                    try:
+                        # Use select() with 0 timeout - TRUE non-blocking check (no wait)
+                        ready = select.select([self._command_socket], [], [], 0)
 
-                    if ready[0]:  # Socket has data available
-                        data, addr = self._command_socket.recvfrom(1024)
-                        print(f"🎯 RAW SOCKET DATA RECEIVED: {len(data)} bytes from {addr}")
-                        if data:
-                            print(f"📨 Command packet received from {addr}: {data[:100]}")  # Debug
-                            try:
-                                command_str = data.decode('utf-8')
-                                command = json.loads(command_str)
-                                print(f"📨 Parsed command: {command}")  # Debug
+                        if ready[0]:  # Socket has data available
+                            data, addr = self._command_socket.recvfrom(1024)
+                            print(f"🎯 RAW SOCKET DATA RECEIVED: {len(data)} bytes from {addr}")
+                            if data:
+                                print(f"📨 Command packet received from {addr}: {data[:100]}")  # Debug
+                                try:
+                                    command_str = data.decode('utf-8')
+                                    command = json.loads(command_str)
+                                    print(f"📨 Parsed command: {command}")  # Debug
 
-                                if command.get('type') == 'reset_board' and command.get('action') == 'stop_all_threads':
-                                    print("🔄 RESET COMMAND RECEIVED - Starting reset sequence...")  # Debug
-                                    logger.info("🔄 Reset board command received from Godot - executing reset")
+                                    if command.get('type') == 'reset_board' and command.get('action') == 'stop_all_threads':
+                                        print("🔄 RESET COMMAND RECEIVED - Starting reset sequence...")  # Debug
+                                        logger.info("🔄 Reset board command received from Godot - executing reset")
 
-                                    try:
-                                        # Stop all threads (with timeout protection)
-                                        print("⏹️ Stopping all threads...")  # Debug
-                                        self.stop_all_threads()
-                                        time.sleep(1)
+                                        try:
+                                            # Stop all threads (with timeout protection)
+                                            print("⏹️ Stopping all threads...")  # Debug
+                                            self.stop_all_threads()
+                                            time.sleep(1)
 
-                                        # Restart board detection
-                                        print("🔄 Restarting board detection...")  # Debug
-                                        self.reset_all_threads()
+                                            # Restart board detection
+                                            print("🔄 Restarting board detection...")  # Debug
+                                            self.reset_all_threads()
 
-                                        print("✅ Reset sequence complete!")  # Debug
-                                        # Break out so new thread can take over
-                                        break
+                                            print("✅ Reset sequence complete!")  # Debug
+                                            # Break out so new thread can take over
+                                            break
 
-                                    except Exception as e:
-                                        print(f"❌ Error during reset: {e}")  # Debug
-                                        logger.error(f"Error during reset sequence: {e}")
-                                        self.bos_thread_running = False
-                                        break
+                                        except Exception as e:
+                                            print(f"❌ Error during reset: {e}")  # Debug
+                                            logger.error(f"Error during reset sequence: {e}")
+                                            self.bos_thread_running = False
+                                            break
 
-                                elif command.get('action') == 'toggle_recording':
-                                    # Handle recording command from Godot UI
-                                    recording_state = command.get('state', False)
-                                    trial_name = command.get('trial_path', '')
+                                    elif command.get('action') == 'toggle_recording':
+                                        # Handle recording command from Godot UI
+                                        recording_state = command.get('state', False)
+                                        trial_name = command.get('trial_path', '')
+                                        patient_name = command.get('patient_name', 'unknown_patient')
 
-                                    print(f"Record command received: state={recording_state}, trial_name={trial_name}")
-                                    logger.info(f"Recording command from Godot: state={recording_state}, trial_name={trial_name}")
+                                        print(f"Record command received: state={recording_state}, patient={patient_name}, trial={trial_name}")
+                                        logger.info(f"Recording command from Godot: state={recording_state}, patient={patient_name}, trial={trial_name}")
 
-                                    try:
-                                        # Create full trial path if starting recording
-                                        if recording_state and trial_name:
-                                            import os
-                                            # Create trial folder in Mobbo_data directory
-                                            base_path = os.path.join(os.getcwd(), "Mobbo_data")
-                                            trial_path = os.path.join(base_path, trial_name)
+                                        try:
+                                            # Create full folder structure if starting recording
+                                            if recording_state and trial_name:
+                                                import os
+                                                # PROPER FOLDER STRUCTURE:
+                                                # Mobbo_data/
+                                                # └── [PATIENT_NAME]/
+                                                #     └── session_[trial_name]/
+                                                #         ├── Board_Data/
+                                                #         ├── CoP_Data/
+                                                #         └── Foot_Data/
 
-                                            # Ensure Mobbo_data folder exists
-                                            os.makedirs(base_path, exist_ok=True)
+                                                base_path = os.path.join(os.getcwd(), "Mobbo_data")
+                                                patient_path = os.path.join(base_path, patient_name)
+                                                trial_path = os.path.join(patient_path, f"session_{trial_name}")
 
-                                            # Create trial-specific folder
-                                            os.makedirs(trial_path, exist_ok=True)
-                                            print(f"✅ Trial folder created: {trial_path}")
-                                        else:
-                                            trial_path = trial_name if trial_name else ""
+                                                # Create folder hierarchy
+                                                os.makedirs(base_path, exist_ok=True)
+                                                print(f"✅ Base path ready: {base_path}")
 
-                                        # Update recording state in MobboData
-                                        if self.mobbo:
-                                            self.mobbo.set_recording_state(recording_state, trial_path)
-                                            if recording_state:
-                                                print(f"✅ Recording started - Trial path: {trial_path}")
+                                                os.makedirs(patient_path, exist_ok=True)
+                                                print(f"✅ Patient folder ready: {patient_path}")
+
+                                                os.makedirs(trial_path, exist_ok=True)
+                                                print(f"✅ Session folder created: {trial_path}")
                                             else:
-                                                print(f"✅ Recording stopped")
-                                        else:
-                                            print("⚠️ MobboData not initialized")
-                                            logger.warning("Recording command received but MobboData not initialized")
-                                    except Exception as e:
-                                        print(f"❌ Error handling recording command: {e}")
-                                        logger.error(f"Error handling recording command: {e}")
+                                                trial_path = trial_name if trial_name else ""
 
-                            except (json.JSONDecodeError, UnicodeDecodeError) as e:
-                                print(f"⚠️ Invalid command format: {e}")  # Debug
-                                logger.warning(f"Invalid command format: {e}")
+                                            # Update recording state in MobboData with patient_name
+                                            if self.mobbo:
+                                                self.mobbo.set_recording_state(recording_state, trial_path, patient_name=patient_name)
+                                                if recording_state:
+                                                    print(f"✅ Recording started - Patient: {patient_name}, Session: {trial_path}")
+                                                else:
+                                                    print(f"✅ Recording stopped")
+                                            else:
+                                                print("⚠️ MobboData not initialized")
+                                                logger.warning("Recording command received but MobboData not initialized")
+                                        except Exception as e:
+                                            print(f"❌ Error handling recording command: {e}")
+                                            logger.error(f"Error handling recording command: {e}")
 
-                except OSError as e:
-                    print(f"⚠️ Socket OS error: {e}")
-                    logger.warning(f"Socket OS error: {e}")
-                except Exception as e:
-                    # Other socket errors
-                    print(f"⚠️ Socket error ({type(e).__name__}): {e}")  # Debug
-                    logger.warning(f"Error receiving command: {e}")
+                                except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                                    print(f"⚠️ Invalid command format: {e}")  # Debug
+                                    logger.warning(f"Invalid command format: {e}")
 
-            # ============================================================
-            # PROCESS AND SEND CoP DATA TO GODOT - NO WAITING
-            # ============================================================
-            if self.mobbo.cop_data:
-                addr_keys = list(self.mobbo.cop_data.keys())
+                    except OSError as e:
+                        print(f"⚠️ Socket OS error: {e}")
+                        logger.warning(f"Socket OS error: {e}")
+                    except Exception as e:
+                        # Other socket errors
+                        print(f"⚠️ Socket error ({type(e).__name__}): {e}")  # Debug
+                        logger.warning(f"Error receiving command: {e}")
 
-                if len(addr_keys) >= 2:
-                    total_weighted_cop = np.zeros((3, 1))
-                    total_weight = 0
-                    self.all_cops = []
+                # ============================================================
+                # PROCESS AND SEND CoP DATA TO GODOT - NO WAITING
+                # ============================================================
+                if self.mobbo.cop_data:
+                    addr_keys = list(self.mobbo.cop_data.keys())
 
-                    # Iterate through all available CoPs
-                    for addr in addr_keys:
-                        copx, copy, w = self.mobbo.cop_data[addr]
-                        weight = w
-                        cop = np.array([copx, copy, 0]).reshape(3, 1)
+                    if len(addr_keys) >= 2:
+                        total_weighted_cop = np.zeros((3, 1))
+                        total_weight = 0
+                        self.all_cops = []
 
-                        # Apply 180-degree rotation
-                        rotation_180_n = np.array([[-1, 0, 0], [0, -1, 0], [0, 0, 1]])
-                        cop_transformed = np.matmul(rotation_180_n.T, cop) / 100
+                        # Iterate through all available CoPs
+                        for addr in addr_keys:
+                            copx, copy, w = self.mobbo.cop_data[addr]
+                            weight = w
+                            cop = np.array([copx, copy, 0]).reshape(3, 1)
 
-                        board_ip = str(addr[0]).strip().lower()
-                        self.reference_board_ip = str(self.reference_board_ip).strip().lower()
+                            # Apply 180-degree rotation
+                            rotation_180_n = np.array([[-1, 0, 0], [0, -1, 0], [0, 0, 1]])
+                            cop_transformed = np.matmul(rotation_180_n.T, cop) / 100
 
-                        if board_ip == self.reference_board_ip:
-                            # This is the reference board
-                            self.all_cops.append((cop_transformed, w))
-                        else:
-                            # This is NOT the reference board → Apply additional transformations
-                            board_id_get = next((k for k, v in self.board_ip.items()
-                                            if str(v).strip().lower() == board_ip), None)
+                            board_ip = str(addr[0]).strip().lower()
+                            self.reference_board_ip = str(self.reference_board_ip).strip().lower()
 
-                            if board_id_get and board_id_get in self.relative_rotations:
-                                cop_transformed = np.matmul(
-                                    self.relative_rotations[board_id_get], cop_transformed
-                                )
-                                cop_transformed += self.relative_translations[board_id_get]
+                            if board_ip == self.reference_board_ip:
+                                # This is the reference board
+                                self.all_cops.append((cop_transformed, w))
+                            else:
+                                # This is NOT the reference board → Apply additional transformations
+                                board_id_get = next((k for k, v in self.board_ip.items()
+                                                if str(v).strip().lower() == board_ip), None)
 
-                            self.all_cops.append((cop_transformed, w))
+                                if board_id_get and board_id_get in self.relative_rotations:
+                                    cop_transformed = np.matmul(
+                                        self.relative_rotations[board_id_get], cop_transformed
+                                    )
+                                    cop_transformed += self.relative_translations[board_id_get]
 
-                        # Compute total weighted CoP
-                        total_weighted_cop += w * cop_transformed
-                        total_weight += w
+                                self.all_cops.append((cop_transformed, w))
 
-                    # Sort CoPs by weight (descending order)
-                    self.all_cops.sort(key=lambda x: x[1], reverse=True)
-                    
-                    # Compute final global CoP
-                    Gcop = total_weighted_cop / total_weight if total_weight != 0 else np.zeros((3, 1))
-                    
-                    # Update visualizer
-                    if self.visualizer:
-                        self.visualizer.cop_and_gcop_update(self.all_cops, total_weight)
-                    
-                    # Update shared data under lock
-                    with data_lock:
-                        if gcop1 is not None:
-                            gcop1[:] = Gcop.flatten()
+                            # Compute total weighted CoP
+                            total_weighted_cop += w * cop_transformed
+                            total_weight += w
 
-                    # ============================================================
-                    # FIXED: SEND LOCAL CoPs AND GLOBAL CoP TO GODOT BRIDGE
-                    # ============================================================
-                    
-                    # Prepare local CoPs data (sanitized) - NO "type" wrapper
-                    local_cops_data = []
-                    for cop_vec, cop_weight in self.all_cops:
-                        cop_flat = cop_vec.flatten()
-                        local_cop = {
-                            'x': sanitize_for_json(cop_flat[0]),
-                            'y': sanitize_for_json(cop_flat[1]),
-                            'z': sanitize_for_json(cop_flat[2]),
-                            'weight': sanitize_for_json(cop_weight)
+                        # Sort CoPs by weight (descending order)
+                        self.all_cops.sort(key=lambda x: x[1], reverse=True)
+                        
+                        # Compute final global CoP
+                        Gcop = total_weighted_cop / total_weight if total_weight != 0 else np.zeros((3, 1))
+                        
+                        # Update visualizer
+                        if self.visualizer:
+                            self.visualizer.cop_and_gcop_update(self.all_cops, total_weight)
+                        
+                        # Update shared data under lock
+                        with data_lock:
+                            if gcop1 is not None:
+                                gcop1[:] = Gcop.flatten()
+
+                        # ============================================================
+                        # FIXED: SEND LOCAL CoPs AND GLOBAL CoP TO GODOT BRIDGE
+                        # ============================================================
+                        
+                        # Prepare local CoPs data (sanitized) - NO "type" wrapper
+                        local_cops_data = []
+                        for cop_vec, cop_weight in self.all_cops:
+                            cop_flat = cop_vec.flatten()
+                            local_cop = {
+                                'x': sanitize_for_json(cop_flat[0]),
+                                'y': sanitize_for_json(cop_flat[1]),
+                                'z': sanitize_for_json(cop_flat[2]),
+                                'weight': sanitize_for_json(cop_weight)
+                            }
+                            # Only add if not all None
+                            if not all(v is None for v in local_cop.values()):
+                                local_cops_data.append(local_cop)
+                        
+                        # Prepare global CoP data (sanitized) - NO "type" wrapper
+                        gcop_flat = Gcop.flatten()
+                        gcop_data = {
+                            'x': sanitize_for_json(gcop_flat[0]),
+                            'y': sanitize_for_json(gcop_flat[1]),
+                            'z': sanitize_for_json(gcop_flat[2]),
+                            'weight': sanitize_for_json(total_weight)
                         }
-                        # Only add if not all None
-                        if not all(v is None for v in local_cop.values()):
-                            local_cops_data.append(local_cop)
-                    
-                    # Prepare global CoP data (sanitized) - NO "type" wrapper
-                    gcop_flat = Gcop.flatten()
-                    gcop_data = {
-                        'x': sanitize_for_json(gcop_flat[0]),
-                        'y': sanitize_for_json(gcop_flat[1]),
-                        'z': sanitize_for_json(gcop_flat[2]),
-                        'weight': sanitize_for_json(total_weight)
-                    }
-                    
-                    # FIXED: Send to Godot Bridge (no wrapper needed)
-                    self.godot_bridge.update_cop_data(
-                        local_cops=local_cops_data,
-                        gcop=gcop_data,
-                        total_weight=total_weight
-                    )
+                        
+                        # FIXED: Send to Godot Bridge (no wrapper needed)
+                        self.godot_bridge.update_cop_data(
+                            local_cops=local_cops_data,
+                            gcop=gcop_data,
+                            total_weight=total_weight
+                        )
 
-            time.sleep(0.01)
+                time.sleep(0.01)
 
-        self.bos_thread_running = False
+            self.bos_thread_running = False
 
     def foot_shape_get_numpy_and_scatter_points(self, foot_keys, right_heel,
                                                 right_toe, left_heel, left_toe):

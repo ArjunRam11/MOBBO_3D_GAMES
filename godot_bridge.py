@@ -240,11 +240,15 @@ class GodotBridgeHelper:
                         data["board_pose"] = self.board_pose_data["data"]
                     else:
                         data["board_pose"] = self.board_pose_data
-                    
+
                     self.send_board_pose_next = False
                     logger.info("📤 Sending board pose data to Godot")
 
-                return data if len(data) > 1 else None
+                # FIXED: Return data if it has EITHER cop data OR board_pose data
+                # (not just when len > 1, which blocks board pose without CoP data)
+                has_cop = "cop" in data
+                has_board_pose = "board_pose" in data
+                return data if (has_cop or has_board_pose) else None
 
         except Exception as e:
             logger.error(f"Error getting CoP data: {e}")
