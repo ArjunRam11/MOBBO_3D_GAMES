@@ -178,7 +178,7 @@ class MobboData:
 
                     self.foot_recorder.record_frame(self.left_points, self.right_points)
 
-                    
+
                     self.missed_data_count = 0
                 except socket.timeout:
                     self.missed_data_count += 1

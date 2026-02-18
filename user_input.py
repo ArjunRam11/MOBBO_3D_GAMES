@@ -84,12 +84,24 @@ class UserInput(QtWidgets.QWidget):
         existing_sessions = [
             folder for folder in os.listdir(base_path) if folder.startswith("session")
         ]
-        
+
+        next_session_num = 1  # Default to 1
         if existing_sessions:
-            latest_session = max(existing_sessions, key=lambda x: int(x.split('_')[0][7:]))
-            next_session_num = int(latest_session.split('_')[0][7:]) + 1
-        else:
-            next_session_num = 1  # First session
+            session_numbers = []
+            for folder in existing_sessions:
+                try:
+                    # Extract session number from folder name: "session{N}_..."
+                    session_part = folder.split('_')[0]  # Get "sessionN"
+                    if len(session_part) > 7:  # "session" is 7 chars
+                        num_str = session_part[7:]
+                        if num_str.isdigit():
+                            session_numbers.append(int(num_str))
+                except (ValueError, IndexError):
+                    # Skip folders that don't match the expected pattern
+                    continue
+
+            if session_numbers:
+                next_session_num = max(session_numbers) + 1
 
         date_time_str = datetime.now().strftime("%d%m%Y_%H%M%S")
         session_folder = f"session{next_session_num}_{date_time_str}"

@@ -15,6 +15,7 @@ import struct
 import copy
 from typing import Optional, Callable
 import numpy as np
+from cop_foot_logging import get_patient_logger
 
 logger = logging.getLogger(__name__)
 
@@ -193,18 +194,24 @@ class GodotBridgeHelper:
         self.bridge = GodotBridge(godot_ip, godot_port, data_format=data_format, send_rate=0.005)
         self.bridge.set_data_callback(self._get_cop_data)
 
-        # Create SECONDARY bridge for FBP + BoS
-        self.bridge_camera = GodotBridge(godot_ip, godot_port_camera, data_format=data_format, send_rate=0.008)
-        self.bridge_camera.set_data_callback(self._get_camera_data)
+        # DISABLED: Secondary bridge for FBP + BoS - Only sending CoP + Board Pose
+        # self.bridge_camera = GodotBridge(godot_ip, godot_port_camera, data_format=data_format, send_rate=0.008)
+        # self.bridge_camera.set_data_callback(self._get_camera_data)
+        self.bridge_camera = None  # Explicitly disable secondary bridge
 
         self.network_manager = type('NetworkManager', (), {})()
         self.network_manager.reset_board_requested = False
         self.network_manager.control_command = {}
         self.network_manager.recording_command = {}
 
-        logger.info(f"🎮 Dual UDP Bridge initialized (ATOMIC MODE):")
-        logger.info(f"   Port {godot_port}: CoP + Board Pose")
-        logger.info(f"   Port {godot_port_camera}: FBP + BoS")
+        # Initialize patient data logger
+        self.patient_logger = get_patient_logger()
+        self.current_patient_id = None
+
+        logger.info(f"🎮 Godot Bridge initialized (ATOMIC MODE):")
+        logger.info(f"   Port {godot_port}: CoP + Board Pose (LOCAL CoP, GCoP, Board Pose)")
+        logger.info(f"   FBP and BoS disabled - only sending CoP and Board Pose data")
+        logger.info(f"   📋 Patient Data Logger initialized")
 
     def _calculate_board_pose_hash(self, board_data: dict) -> int:
         """Calculate hash of board pose data"""
@@ -223,7 +230,7 @@ class GodotBridgeHelper:
         return hash((ref_id, board_ids))
 
     def _get_cop_data(self) -> Optional[dict]:
-        """Callback for PRIMARY UDP port - CoP + Board Pose"""
+        """Callback for PRIMARY UDP port (8000) - Local CoP + GCoP + Board Pose"""
         try:
             with self.data_lock:
                 data = {
@@ -256,49 +263,21 @@ class GodotBridgeHelper:
                 # (not just when len > 1, which blocks board pose without CoP data)
                 has_cop = "cop" in data
                 has_board_pose = "board_pose" in data
+
+                # Log CoP data if logging is active
+                if has_cop:
+                    self.log_cop_data_internal()
+
                 return data if (has_cop or has_board_pose) else None
 
         except Exception as e:
             logger.error(f"Error getting CoP data: {e}")
         return None
 
-    def _get_camera_data(self) -> Optional[dict]:
-        """Callback for SECONDARY UDP port - FBP + BoS (Individual points like GCOP)"""
-        try:
-            with self.data_lock:
-                data = {
-                    "timestamp": time.time()
-                }
-
-                # FIXED: Send each FBP point individually (like GCOP) - NO RACE CONDITION!
-                # Each point is a separate variable, no array iteration needed in Godot
-
-                # FBP: Send 18 individual keypoints wrapped in "fbp" key
-                fbp_has_valid = any(p is not None for p in self.fbp_points)
-                if fbp_has_valid:
-                    fbp_data = {}
-                    # Send each of 18 points individually as fbp_point_0 through fbp_point_17
-                    for i in range(18):
-                        if self.fbp_points[i] is not None:
-                            fbp_data[f"fbp_point_{i}"] = copy.deepcopy(self.fbp_points[i])
-                    data["fbp"] = fbp_data
-
-                # BoS: Keep as atomic arrays (no iteration needed for these)
-                bos_has_valid = (len(self.bos_left_points) > 0 or
-                                len(self.bos_right_points) > 0)
-                if bos_has_valid:
-                    bos_data = {}
-                    if self.bos_left_points:
-                        bos_data["left_foot"] = copy.deepcopy(self.bos_left_points)
-                    if self.bos_right_points:
-                        bos_data["right_foot"] = copy.deepcopy(self.bos_right_points)
-                    data["bos"] = bos_data
-
-                return data if len(data) > 1 else None
-
-        except Exception as e:
-            logger.error(f"Error getting camera data: {e}")
-        return None
+    # DISABLED: _get_camera_data removed - Port 8001 disabled (FBP and BoS not sent)
+    # def _get_camera_data(self) -> Optional[dict]:
+    #     """Callback for SECONDARY UDP port - FBP + BoS (DISABLED)"""
+    #     # ... function disabled ...
 
     def update_cop_data(self, local_cops: list, gcop: dict, total_weight: float):
         """
@@ -381,15 +360,19 @@ class GodotBridgeHelper:
             self.bos_right_points = copy.deepcopy(right_foot_list) if right_foot_list else []
 
     def start(self):
-        """Start sending to Godot on BOTH UDP ports"""
+        """Start sending to Godot on PRIMARY UDP port (8000 only)"""
         self.bridge.start()
-        self.bridge_camera.start()
-        logger.info("✅ GodotBridgeHelper started (ATOMIC MODE)")
+        # DISABLED: Secondary bridge disabled - FBP/BoS not sent
+        # if self.bridge_camera:
+        #     self.bridge_camera.start()
+        logger.info("✅ GodotBridgeHelper started (CoP + Board Pose only)")
 
     def stop(self):
         """Stop sending to Godot"""
         self.bridge.stop()
-        self.bridge_camera.stop()
+        # DISABLED: Secondary bridge disabled - FBP/BoS not sent
+        # if self.bridge_camera:
+        #     self.bridge_camera.stop()
         logger.info("🛑 GodotBridgeHelper stopped")
 
     def get_status(self):
@@ -399,7 +382,102 @@ class GodotBridgeHelper:
         status['board_pose_hash'] = self.previous_board_pose_hash
         status['local_cops_count'] = len(self.local_cops)
         status['has_gcop'] = bool(self.gcop)
+
+        # Add patient logging status
+        logger_status = self.patient_logger.get_logging_status()
+        status['patient_logging'] = logger_status
+
         return status
+
+    # ============ PATIENT DATA LOGGING METHODS ============
+
+    def set_patient(self, patient_id: str) -> bool:
+        """
+        Set the current patient for data logging
+
+        Args:
+            patient_id: Patient ID/name from Godot (e.g., "effe", "Arjun")
+
+        Returns:
+            True if successful, False otherwise
+        """
+        self.current_patient_id = patient_id
+        success = self.patient_logger.set_patient(patient_id)
+        if success:
+            logger.info(f"👤 Patient set to: {patient_id}")
+        return success
+
+    def start_patient_logging(self) -> bool:
+        """
+        Start logging CoP and foot keypoint data for current patient
+
+        Returns:
+            True if logging started successfully, False otherwise
+        """
+        if not self.current_patient_id:
+            logger.warning("⚠️ Cannot start logging: Patient not set")
+            return False
+
+        success = self.patient_logger.start_logging()
+        if success:
+            logger.info(f"🔴 DATA LOGGING STARTED for patient: {self.current_patient_id}")
+        return success
+
+    def stop_patient_logging(self) -> bool:
+        """
+        Stop logging CoP and foot keypoint data
+
+        Returns:
+            True if logging stopped successfully, False otherwise
+        """
+        success = self.patient_logger.stop_logging()
+        if success:
+            logger.info(f"⚪ DATA LOGGING STOPPED for patient: {self.current_patient_id}")
+        return success
+
+    def log_cop_data_internal(self):
+        """
+        Log current CoP data to CSV (called from _get_cop_data)
+        This logs the global CoP that's being sent to Godot
+        """
+        if self.patient_logger.is_logging and self.gcop:
+            try:
+                self.patient_logger.log_cop_data(
+                    gcop=self.gcop,
+                    local_cops=self.local_cops,
+                    epoch_time=time.time()
+                )
+            except Exception as e:
+                logger.error(f"❌ Error logging CoP data: {e}")
+
+    def log_foot_keypoints_internal(self, left_heel: tuple, left_toe: tuple,
+                                   right_heel: tuple, right_toe: tuple) -> bool:
+        """
+        Log foot keypoint data to CSV
+
+        Args:
+            left_heel: (x, y, z) tuple for left heel
+            left_toe: (x, y, z) tuple for left toe
+            right_heel: (x, y, z) tuple for right heel
+            right_toe: (x, y, z) tuple for right toe
+
+        Returns:
+            True if logging was attempted, False otherwise
+        """
+        if self.patient_logger.is_logging:
+            try:
+                self.patient_logger.log_foot_keypoints(
+                    left_heel=left_heel,
+                    left_toe=left_toe,
+                    right_heel=right_heel,
+                    right_toe=right_toe,
+                    epoch_time=time.time()
+                )
+                return True
+            except Exception as e:
+                logger.error(f"❌ Error logging foot keypoints: {e}")
+                return False
+        return False
 
 
 if __name__ == "__main__":

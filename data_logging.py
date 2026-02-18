@@ -43,23 +43,23 @@ class DataLogging(QObject):  # Inherit from QObject for signal-slot mechanism
 
     @pyqtSlot()
     def toggle_recording(self):
-        
+
         if not self.is_recording:
-            
+
             self.is_recording = True
             self.start_recording()
             self.trail_data_path=self.create_trial_folder()
-            
+
             self.frame_process.set_recording_state(self.is_recording,self.trail_data_path)
-            
+
             self.mobbo.set_recording_state( self.is_recording,self.trail_data_path)
             self.record_button.setText("Stop Recording")
             self.record_button.setStyleSheet("QPushButton { text-align: left; background-color: red; color: white; font-size: 16px; }")
             self.record_button.setIcon(QIcon("D:/mocap_3d_show/images/stop-recording-icon.png"))
-            
-           
+
+
         else:
-            
+
             self.is_recording = False
             self.stop_recording()
             self.frame_process.set_recording_state(self.is_recording,self.trail_data_path)
@@ -82,10 +82,18 @@ class DataLogging(QObject):  # Inherit from QObject for signal-slot mechanism
          
         self.is_recording = False
 
-    def set_user_name(self ):
-        name=self.user_input.get_user_name()
+    def set_user_name(self):
+        name = self.user_input.get_user_name()
 
-        
+        if not name:
+            raise ValueError(
+                "Error: Patient name not set!\n\n"
+                "Please follow these steps:\n"
+                "1. Enter your name/ID in the 'Enter Name/ID' field\n"
+                "2. Click the 'Submit' button\n"
+                "3. Then click 'Start Recording'"
+            )
+
         self.user_name = name.strip()
         self.session_path = self.user_input.get_session_path()
         self.trial_number = self.get_next_trial_number()  # Initialize trial number

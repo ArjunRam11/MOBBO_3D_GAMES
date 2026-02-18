@@ -512,6 +512,16 @@ class BOSEstimator:
     def _init_command_socket(self):
         """Initialize UDP socket for receiving Godot commands on port 9000 - NON-BLOCKING with select()"""
         try:
+            # Close old socket if it exists
+            if self._command_socket:
+                try:
+                    self._command_socket.close()
+                    logger.info("Closed previous command socket")
+                except Exception as e:
+                    logger.warning(f"Error closing previous socket: {e}")
+                self._command_socket = None
+
+            # Create new socket
             self._command_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self._command_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self._command_socket.bind(("127.0.0.1", 9000))
@@ -558,6 +568,13 @@ class BOSEstimator:
             stop_flag_aruco = True
             logger.info("🔄 RESET: Flags reset to True - threads will run")
 
+            # CRITICAL FIX: Reinitialize command socket for the new thread
+            # This prevents socket state issues from previous compute_COP thread
+            logger.info("🔄 RESET: Reinitializing command socket...")
+            time.sleep(0.2)  # Small delay before reinit
+            self._init_command_socket()
+            logger.info("✅ Command socket reinitialized")
+
             # CRITICAL FIX: Ensure WiFi thread continues during reset
             if self.mobbo:
                 self.mobbo.start()  # Set flag to continue WiFi data reception
@@ -599,6 +616,8 @@ class BOSEstimator:
             logger.info("🔄 RESET: ArUco thread restarted")
 
             logger.info("✅ RESET: All threads restarted and running")
+            stop_threads = False
+            stop_flag_aruco = False
 
         except Exception as e:
             logger.error(f"Error during reset_all_threads: {e}")
@@ -607,6 +626,12 @@ class BOSEstimator:
                 # CRITICAL: Set flags to True even in exception handler
                 stop_threads = True
                 stop_flag_aruco = True
+
+                # CRITICAL: Reinitialize socket even in exception handler
+                logger.info("🔄 RESET: Reinitializing command socket in exception handler...")
+                time.sleep(0.2)
+                self._init_command_socket()
+                logger.info("✅ Command socket reinitialized in exception handler")
 
                 self.bos_thread_running = False
                 time.sleep(0.1)
@@ -622,6 +647,8 @@ class BOSEstimator:
                 )
                 self.aruco_thread_.start()
                 print("✅ ArUco thread restarted in exception handler")
+                stop_threads = False
+                stop_flag_aruco = False
             except Exception as thread_error:
                 logger.error(f"Failed to restart threads: {thread_error}")
 
