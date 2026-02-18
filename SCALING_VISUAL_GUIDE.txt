@@ -1,0 +1,387 @@
+================================================================================
+                    CoP SCALING VISUAL ARCHITECTURE
+================================================================================
+
+DATA FLOW DIAGRAM:
+==================
+
+    PYTHON (main.py)
+         ↓
+    Detects board pose
+    Extracts layout: "1x2" or "2x1"
+         ↓
+    Sends UDP packet with:
+    - raw_x, raw_y, raw_z (global CoP)
+    - board_layout info
+         ↓
+    GODOT (global_script.gd)
+         ↓
+    handle_cop_data_safe()
+         ├─ Receives raw_x, raw_y, raw_z
+         ├─ Normalizes using board layout ranges
+         │   - cop_x_min, cop_x_max
+         │   - cop_y_min, cop_y_max
+         ├─ Converts to screen coordinates
+         │   - net_x, net_y, net_z
+         └─ Stores in output vectors
+            - network_position (2D games)
+            - network_position3D (3D games)
+         ↓
+    handle_board_pose_data_safe()
+         └─ set_scaling_for_layout()
+            (Updates cop_x_min/max, cop_y_min/max)
+         ↓
+    GAME SCRIPTS
+         ├─ Flappy Bird (pilot.gd)
+         │  position.lerp(network_position3D, 0.8)
+         ├─ Fruit Catcher (paddle.gd)
+         │  position.x = lerp(position.x, network_position.x, 0.8)
+         └─ Jumpify (2Dplayer.gd)
+            position.lerp(network_position3D, 1.0)
+         ↓
+    GAME OBJECTS MOVE ✓
+
+
+================================================================================
+                      BOARD LAYOUT COORDINATE SPACES
+================================================================================
+
+BOARD LAYOUT 1x2 (Vertical Stacking):
+═════════════════════════════════════════════════════════════════════════════
+
+User stands facing LEFT-RIGHT
+
+  PHYSICAL SPACE                 GAME SPACE             SCREEN SPACE
+  (From Python)                  (Normalized)           (Pixels)
+
+     ↑ Y (0.225)                   ↑ Y (1.0)              ↑ Y (MAX_Y)
+     |                             |                      |
+     |  ┌──────────┐               |  ┌────────┐          |  ┌────────────┐
+ (+) |  │          │               |  │        │          |  │            │
+     |  │ BOARD 1  │      →        |  │ 1x2    │    →     |  │   GAME     │
+     |  │          │               |  │SPACE   │          |  │   SCREEN   │
+     |  ├──────────┤               |  ├────────┤          |  ├────────────┤
+ (0) +──┼──────────┼───────────→ X ├──┼────────┼──────→ X ├──┼────────────┼──
+     |  │ BOARD 2  │               |  │        │          |  │            │
+ (-) |  │          │               |  │        │          |  │            │
+     |  └──────────┘               |  └────────┘          |  └────────────┘
+     ↓ Y (-0.225)                   ↓ Y (0.0)              ↓ Y (MIN_Y)
+
+  X: -0.90 to +0.30           X: 0.0 to 1.0         X: MIN_X to MAX_X
+  Y: -0.225 to +0.225         Y: 0.0 to 1.0         Y: MIN_Y to MAX_Y
+
+  Board Size: 0.6m × 1.2m
+  (Two 0.6m×0.6m boards stacked)
+
+
+BOARD LAYOUT 2x1 (Horizontal Stacking):
+═════════════════════════════════════════════════════════════════════════════
+
+User stands facing FORWARD-BACKWARD
+
+  PHYSICAL SPACE                 GAME SPACE             SCREEN SPACE
+  (From Python)                  (Normalized)           (Pixels)
+
+     ↑ Y (0.675)                   ↑ Y (1.0)              ↑ Y (MAX_Y)
+     |                             |                      |
+     |  ┌──────────┬──────────┐    |  ┌────────────────┐  |  ┌────────────────┐
+ (+) |  │          │          │    |  │                │  |  │                │
+     |  │ BOARD 1  │ BOARD 2  │ →  |  │  2x1 SPACE     │ →|  │   GAME SCREEN  │
+ (0) +──┼──────────┼──────────┼───→+──┼────────────────┼──+──┼────────────────┼──
+     |  │          │          │    |  │                │  |  │                │
+ (-) |  └──────────┴──────────┘    |  └────────────────┘  |  └────────────────┘
+     ↓ Y (-0.225)                   ↓ Y (0.0)              ↓ Y (MIN_Y)
+
+  X: +0.30 to -0.30 ← REVERSED!   X: 0.0 to 1.0         X: MIN_X to MAX_X
+  Y: -0.225 to +0.675             Y: 0.0 to 1.0         Y: MIN_Y to MAX_Y
+
+  Board Size: 1.2m × 0.6m
+  (Two 0.6m×0.6m boards placed side-by-side)
+
+  ⚠️ NOTE: X direction is REVERSED in 2x1!
+           cop_x_min (0.30) > cop_x_max (-0.30)
+           means normalized_x = 1.0 - normalized_x
+
+
+================================================================================
+                    NORMALIZATION FORMULA BY LAYOUT
+================================================================================
+
+GENERIC FORMULA:
+════════════════
+
+  actual_min = min(cop_x_min, cop_x_max)
+  actual_max = max(cop_x_min, cop_x_max)
+
+  normalized = (raw_value - actual_min) / (actual_max - actual_min)
+  normalized = clamp(normalized, 0.0, 1.0)
+
+  # Handle reversed axis (2x1 layout)
+  if cop_x_min > cop_x_max:
+    normalized = 1.0 - normalized
+
+  screen_value = screen_min + (normalized * (screen_max - screen_min))
+
+
+EXAMPLE 1x2 LAYOUT:
+═══════════════════
+
+  Given:
+    raw_x = -0.30 (middle position)
+    cop_x_min = -0.90
+    cop_x_max = +0.30
+    MIN_X = 100
+    MAX_X = 1820
+
+  Step 1: Find actual range
+    actual_min = -0.90
+    actual_max = +0.30
+    range = 1.20
+
+  Step 2: Normalize
+    normalized = (-0.30 - (-0.90)) / 1.20
+    normalized = 0.60 / 1.20
+    normalized = 0.50  (middle of screen)
+
+  Step 3: Check if reversed
+    cop_x_min (-0.90) NOT > cop_x_max (0.30)
+    So NO inversion
+
+  Step 4: Map to screen
+    screen_x = 100 + (0.50 * (1820 - 100))
+    screen_x = 100 + (0.50 * 1720)
+    screen_x = 100 + 860
+    screen_x = 960  ✓ (center of screen)
+
+
+EXAMPLE 2x1 LAYOUT:
+═══════════════════
+
+  Given:
+    raw_x = 0.0 (middle position)
+    cop_x_min = +0.30
+    cop_x_max = -0.30
+    MIN_X = 100
+    MAX_X = 1820
+
+  Step 1: Find actual range
+    actual_min = -0.30  (min of 0.30 and -0.30)
+    actual_max = +0.30  (max of 0.30 and -0.30)
+    range = 0.60
+
+  Step 2: Normalize
+    normalized = (0.0 - (-0.30)) / 0.60
+    normalized = 0.30 / 0.60
+    normalized = 0.50  (middle)
+
+  Step 3: Check if reversed ⚠️
+    cop_x_min (0.30) IS > cop_x_max (-0.30)
+    INVERT: normalized = 1.0 - 0.50 = 0.50
+    (stays same in this case, but formula reverses motion)
+
+  Step 4: Map to screen
+    screen_x = 100 + (0.50 * (1820 - 100))
+    screen_x = 960  ✓ (center of screen)
+
+
+MOTION EXAMPLE 2x1 RIGHT EDGE:
+══════════════════════════════
+
+  Given: raw_x = 0.30 (right side of 2x1 board)
+
+  Normalize:
+    normalized = (0.30 - (-0.30)) / 0.60 = 1.0
+
+  Reverse (because 2x1):
+    normalized = 1.0 - 1.0 = 0.0
+
+  Screen:
+    screen_x = 100 + (0.0 * 1720) = 100  ← LEFT EDGE
+
+  ✓ Correctly maps right edge of board to left edge of screen!
+
+
+================================================================================
+                       GAME RESPONSE CHARACTERISTICS
+================================================================================
+
+FLAPPY BIRD (pilot.gd):
+═══════════════════════
+
+Input:  network_position3D.y (vertical CoP position)
+Output: position.y (bird height)
+Movement: position.lerp(network_position, 0.8)
+
+Behavior:
+  • Smooth movement (0.8 lerp = 80% influence per frame)
+  • Controlled by Y axis (forward/backward CoP)
+  • X position FIXED at 100
+  • Good for vertical movement tasks
+
+Response Time: ~50ms (smooth, natural)
+
+
+FRUIT CATCHER (paddle.gd):
+══════════════════════════
+
+Input:  network_position.x (horizontal CoP position)
+Output: position.x (paddle left/right)
+Movement: position.x = lerp(position.x, adjusted_x, 0.8)
+
+Behavior:
+  • Smooth horizontal movement
+  • Controlled by X axis (left/right CoP)
+  • Y position FIXED at 615
+  • Applies center offset: Vector2(120, 200)
+  • Movement threshold: 2.0 pixels minimum
+
+Response Time: ~50ms (smooth, with threshold)
+
+
+JUMPIFY (2Dplayer.gd):
+══════════════════════
+
+Input:  network_position3D (full position)
+Output: position (player location)
+Movement: position.lerp(network_position, movement_smoothing)  # 1.0
+
+Behavior:
+  • DIRECT movement (1.0 lerp = 100% new position per frame)
+  • Controlled by both X and Y axes
+  • Full 2D movement in game space
+  • Maps back to game coordinates: game_x = (position.x - X_OFFSET) / SCALER
+  • Logs position to CSV file
+
+Response Time: Immediate (no smoothing)
+
+
+MOTION PROFILES:
+════════════════
+
+Flappy Bird:       ▓░░░░░░░░░░░░░░░░░░░░░ Smooth (0.8)
+Fruit Catcher:     ▓░░░░░░░░░░░░░░░░░░░░░ Smooth (0.8)
+Jumpify:           ████████████████████░░░ Direct (1.0)
+
+Lerp Speed Impact:
+  0.1 = Very smooth, laggy feel (heavy smoothing)
+  0.5 = Moderate smoothing
+  0.8 = Good balance (current)
+  1.0 = No smoothing, immediate response
+
+
+================================================================================
+                        CONFIGURATION CHECKLIST
+================================================================================
+
+BEFORE TESTING:
+═══════════════
+
+Board Layout Detection:
+  ☐ Verify Python sends layout in board_pose_data
+  ☐ Check console for: "📐 Board Layout: { "Board_Layout": "2x1" }"
+  ☐ Verify handle_board_pose_data_safe() extracts layout
+  ☐ Verify set_scaling_for_layout() is called
+
+Scaling Configuration:
+  ☐ Verify variables added: cop_x_min, cop_x_max, cop_y_min, cop_y_max
+  ☐ Check console for: "📐 SCALING CONFIGURED: 2x1 Layout"
+  ☐ Verify scaling ranges print correctly:
+     X: 0.3000 to -0.3000 (for 2x1)
+     Y: -0.2250 to 0.6750 (for 2x1)
+
+CoP Normalization:
+  ☐ Verify raw_x, raw_y, raw_z received from Python
+  ☐ Verify normalization formula in handle_cop_data_safe()
+  ☐ Check console for: "🌐 GLOBAL CoP: x=0.xxxx, y=0.xxxx, z=0.xxxx"
+  ☐ Verify net_x, net_y, net_z calculated correctly
+
+Game Integration:
+  ☐ Verify games get network_position or network_position3D
+  ☐ Test Fruit Catcher: Move right (CoP X+), paddle moves right
+  ☐ Test Fruit Catcher: Move left (CoP X-), paddle moves left
+  ☐ Test Jumpify: Move forward (CoP Y+), player moves up screen
+  ☐ Test Jumpify: Move backward (CoP Y-), player moves down screen
+  ☐ Test Flappy Bird: Move forward (CoP Y+), bird moves up
+  ☐ Test Flappy Bird: Move backward (CoP Y-), bird moves down
+
+Layout Switching:
+  ☐ Reset game (change layout from 2x1 to 1x2)
+  ☐ Verify new scaling ranges are printed
+  ☐ Verify games respond correctly to new ranges
+  ☐ Reset again (change back to 2x1)
+  ☐ Verify scaling reverts correctly
+
+
+TROUBLESHOOTING:
+════════════════
+
+Symptom: Game object doesn't move
+  → Check: Is raw_x/y/z received? Print in console
+  → Check: Is set_scaling_for_layout() called?
+  → Check: Are cop_x_min/max/y_min/max values reasonable?
+  → Fix: Manually call set_scaling_for_layout("2x1") to test
+
+Symptom: Movement is inverted (left becomes right)
+  → This is EXPECTED for 2x1 layout (X is reversed)
+  → Verify: cop_x_min (0.30) > cop_x_max (-0.30)
+  → Verify: normalized = 1.0 - normalized is applied
+  → For 1x2: movement should not be inverted
+
+Symptom: Movement is jerky or unresponsive
+  → Check: Movement smoothing value (lerp factor)
+  → For smooth: use 0.8 (current)
+  → For responsive: use 1.0 (Jumpify)
+  → Adjust: change 0.8 to 0.5 for more smoothing
+
+Symptom: Game object goes off-screen
+  → Check: Are MIN_X, MAX_X, MIN_Y, MAX_Y set correctly?
+  → Check: Is clampf() applied to normalized values (0.0-1.0)?
+  → Check: Do your scaling ranges match board dimensions?
+  → Fix: Add bounds checking in game scripts
+
+
+================================================================================
+                    FINAL VERIFICATION COMMAND
+================================================================================
+
+To verify everything is working, add this to a game and call it:
+
+func test_cop_scaling() -> void:
+    GlobalScript.print_cop_scaling_info()
+
+    # This will print:
+    # - Current board layout
+    # - CoP ranges for layout
+    # - Screen ranges
+    # - Current CoP position
+    # - Current network_position values
+
+# Then press a button or use console command to call:
+# GlobalScript.test_cop_scaling()
+
+Expected output:
+═══════════════
+============================================================
+📊 CoP SCALING CONFIGURATION
+============================================================
+Board Layout: 2x1
+
+CoP Ranges (from board):
+  X: 0.3000 to -0.3000
+  Y: -0.2250 to 0.6750
+
+Screen Ranges (output):
+  X: 100 to 1820
+  Y: 180 to 1100
+
+Current CoP Position:
+  Raw: (0.1234, 0.0567, -0.0891)
+  Screen: (960.5, 640.3, 640.3)
+
+Game Positions:
+  network_position: (960.5, 640.3)
+  network_position3D: (960.5, 640.3)
+============================================================
+
+
+================================================================================

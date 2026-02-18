@@ -1,0 +1,248 @@
+================================================================================
+                  CoP SCALING QUICK REFERENCE GUIDE
+================================================================================
+
+FLOW DIAGRAM:
+=============
+
+Python (main.py)
+    ↓ UDP packets
+Godot global_script.gd handle_cop_data_safe()
+    ↓ Receives raw_x, raw_y, raw_z
+    ↓ Applies SCALER values
+global_script.gd Lines 393-407
+    ↓
+GlobalScript.network_position      (2D unscaled)  ← Fruit Catcher, Flappy Bird
+GlobalScript.network_position3D    (3D unscaled)  ← Jumpify, Flappy Bird 3D
+GlobalScript.scaled_network_position   (2D scaled)
+GlobalScript.scaled_network_position3D  (3D scaled)
+    ↓
+Game Scripts (_physics_process)
+    ↓
+position = lerp(position, network_position, 0.8)  ← Smooth movement
+    ↓
+Game Object (Paddle, Bird, Player) MOVES
+
+
+================================================================================
+                           SCALING VARIABLES
+================================================================================
+
+RAW CoP VALUES (from Python):
+────────────────────────────
+Line 93:   var raw_x: float = 0.0
+Line 94:   var raw_y: float = 0.0
+Line 95:   var raw_z: float = 0.0
+
+SCALER MULTIPLIERS (Lines 51-56):
+──────────────────────────────────
+Line 51:   @export var PLAYER_POS_SCALER_X: int = 20 * 100    # = 2000
+Line 52:   @export var PLAYER_POS_SCALER_Z: int = 20 * 100    # = 2000
+Line 55:   @export var PLAYER3D_POS_SCALER_X: int = 20 * 100  # = 2000
+Line 56:   @export var PLAYER3D_POS_SCALER_Y: int = 30 * 100  # = 3000
+
+SCREEN OFFSETS (Lines 40-44):
+──────────────────────────────
+Line 40:   var X_SCREEN_OFFSET: int          (center X)
+Line 41:   var Y_SCREEN_OFFSET: int          (center Y for 2D)
+Line 44:   var Y_SCREEN_OFFSET3D: int        (center Y for 3D)
+
+OUTPUT POSITIONS (Lines 101-108):
+──────────────────────────────────
+Line 102:  var network_position: Vector2 = Vector2.ZERO           # 2D
+Line 105:  var network_position3D: Vector2 = Vector2.ZERO         # 3D
+Line 116:  var scaled_network_position: Vector2 = Vector2.ZERO
+Line 120:  var scaled_network_position3D: Vector2 = Vector2.ZERO
+
+
+================================================================================
+                         GAME IMPLEMENTATION
+================================================================================
+
+GAME 1: FLAPPY BIRD
+──────────────────
+File: flappy_bird/Scripts/pilot.gd
+Uses: GlobalScript.network_position3D (or scaled_network_position3D)
+Line 35-39: network_position = GlobalScript.network_position3D
+            if network_position != Vector2.ZERO:
+                position = position.lerp(network_position, 0.8)
+Control: Vertical movement (Y) controls bird height, X is fixed at 100
+
+
+GAME 2: FRUIT CATCHER
+─────────────────────
+File: fruit_catcher/Scenes/Paddle/paddle.gd
+Uses: GlobalScript.network_position (or scaled_network_position)
+Line 56: network_position = GlobalScript.network_position
+Line 68: position.x = lerp(position.x, adjusted_position.x, 0.8)
+Control: Horizontal movement (X) controls paddle position, Y fixed at 615
+
+
+GAME 3: JUMPIFY
+───────────────
+File: Jumpify/Scripts/2Dplayer.gd
+Uses: GlobalScript.network_position3D (or scaled_network_position3D)
+Line 211: network_position = GlobalScript.network_position3D
+Line 219: position = position.lerp(network_position, movement_smoothing)  # 1.0
+Line 234-236: game_x = (position.x - X_SCREEN_OFFSET) / PLAYER_POS_SCALER_X
+              game_z = (position.y - Y_SCREEN_OFFSET) / PLAYER_POS_SCALER_Z
+Control: Both X and Y movement, direct mapping (no lerp smoothing)
+
+
+================================================================================
+                        BOARD LAYOUT SCALING
+================================================================================
+
+BOARD LAYOUT 1x2 (Vertical stacking - 1 wide, 2 tall):
+───────────────────────────────────────────────────────
+Description: One board placed horizontally, two boards stacked vertically
+User Position: Standing facing LEFT-RIGHT axis
+
+CoP X Range:    -0.90 to 0.30  (LEFT to RIGHT: 1.20 units wide)
+CoP Y Range:    -0.225 to 0.225 (FRONT to BACK: 0.45 units deep)
+Board Width:    1 unit
+Board Height:   2 units (0.6m + 0.6m)
+
+User Movement Space:
+  ┌─────────────┐
+  │     1x2     │  ← Two boards stacked vertically
+  │   LAYOUT    │     (0.6m × 1.2m)
+  └─────────────┘
+  X: -0.90 to 0.30
+  Y: -0.225 to 0.225
+
+
+BOARD LAYOUT 2x1 (Horizontal stacking - 2 wide, 1 tall):
+────────────────────────────────────────────────────────
+Description: Two boards placed side by side, one board tall
+User Position: Standing facing FORWARD-BACKWARD axis
+
+CoP X Range:    0.30 to -0.30  (RIGHT to LEFT: 0.60 units wide) [REVERSED]
+CoP Y Range:    -0.225 to 0.675 (BACK to FRONT: 0.90 units deep)
+Board Width:    2 units (0.6m + 0.6m)
+Board Height:   1 unit
+
+User Movement Space:
+  ┌──────────────────┐
+  │     2x1 LAYOUT   │  ← Two boards side by side (1.2m × 0.6m)
+  └──────────────────┘
+  X: 0.30 to -0.30 (REVERSED!)
+  Y: -0.225 to 0.675
+
+
+================================================================================
+                          WHERE TO MAKE CHANGES
+================================================================================
+
+TO ADD BOARD LAYOUT DETECTION:
+– File: e:\Godot_interface\MOBBO_3D_GAMES\MOBBO_3D_GAMES\NOARKGames\Main_screen\Scripts\global_script.gd
+– Function: handle_board_pose_data_safe()
+– Lines: 545-549 (where board layout is printed)
+– Add: set_scaling_for_layout(layout_string) call
+
+TO ADD SCALING ADJUSTMENT LOGIC:
+– File: e:\Godot_interface\MOBBO_3D_GAMES\MOBBO_3D_GAMES\NOARKGames\Main_screen\Scripts\global_script.gd
+– Function: handle_cop_data_safe()
+– Lines: 386-407 (where CoP is converted to screen position)
+– Modify: Calculation of net_x, net_y, net_z using board layout ranges
+
+NEW VARIABLES TO ADD (Lines 95-108):
+– board_layout: String          (current layout: "1x2" or "2x1")
+– cop_x_min, cop_x_max: float  (X scaling range)
+– cop_y_min, cop_y_max: float  (Y scaling range)
+– set_scaling_for_layout() function
+
+
+================================================================================
+                           QUICK IMPLEMENTATION
+================================================================================
+
+STEP 1: Add variables after line 95
+────────────────────────────────────
+    var board_layout: String = "2x1"
+    var cop_x_min: float = 0.30
+    var cop_x_max: float = -0.30
+    var cop_y_min: float = -0.225
+    var cop_y_max: float = 0.675
+
+STEP 2: Add function after handle_cop_data_safe() (around line 420)
+──────────────────────────────────────────────────────────────────────
+    func set_scaling_for_layout(layout: String) -> void:
+        board_layout = layout
+        if layout == "1x2":
+            cop_x_min = -0.90
+            cop_x_max = 0.30
+            cop_y_min = -0.225
+            cop_y_max = 0.225
+            print("📐 Scaling: 1x2 Layout")
+        elif layout == "2x1":
+            cop_x_min = 0.30
+            cop_x_max = -0.30
+            cop_y_min = -0.225
+            cop_y_max = 0.675
+            print("📐 Scaling: 2x1 Layout")
+
+STEP 3: Update line 549 to call function
+──────────────────────────────────────────
+    if data_content.has("layout"):
+        var layout_container = data_content["layout"]
+        if typeof(layout_container) == TYPE_DICTIONARY:
+            var layout_str = layout_container.get("Board_Layout", "2x1")
+            set_scaling_for_layout(layout_str)  ← ADD THIS LINE
+            print("📐 Board Layout: %s" % str(layout_container))
+
+STEP 4: Modify lines 393-401 to use layout scaling
+──────────────────────────────────────────────────────
+    # Normalize CoP to 0.0-1.0 range
+    var actual_x_min = min(cop_x_min, cop_x_max)
+    var actual_x_max = max(cop_x_min, cop_x_max)
+    var normalized_x = (raw_x - actual_x_min) / (actual_x_max - actual_x_min)
+    var normalized_y = (raw_y - cop_y_min) / (cop_y_max - cop_y_min)
+
+    # Invert X if 2x1 layout (reversed)
+    if board_layout == "2x1" and cop_x_min > cop_x_max:
+        normalized_x = 1.0 - normalized_x
+
+    # Map to screen
+    normalized_x = clampf(normalized_x, 0.0, 1.0)
+    normalized_y = clampf(normalized_y, 0.0, 1.0)
+    net_x = MIN_X + (normalized_x * float(MAX_X - MIN_X))
+    net_y = MIN_Y + (normalized_y * float(MAX_Y - MIN_Y))
+    net_z = net_y  # For 2D games
+
+    network_position = Vector2(net_x, net_z)
+    network_position3D = Vector2(net_x, net_y)
+
+
+================================================================================
+                              TESTING
+================================================================================
+
+After implementation, verify:
+ 1. Start game, check Python console for: "📐 Board Layout: { "Board_Layout": "2x1" }"
+ 2. Check Godot console for: "📐 Scaling configured for 2x1 layout"
+ 3. Run Fruit Catcher, move CoP X from 0.30→-0.30, paddle should move left
+ 4. Run Jumpify, move CoP Y from -0.225→0.675, player should move forward
+ 5. Test board layout change (reset), should update scaling ranges
+ 6. Verify game objects respond smoothly to CoP movement
+
+
+================================================================================
+                              REFERENCES
+================================================================================
+
+See detailed analysis: COP_TO_GAME_SCALING_ANALYSIS.md
+
+All scaling happens in: global_script.gd
+  - Lines 40-56: Scaler variables
+  - Lines 89-95: Raw CoP values
+  - Lines 101-120: Output positions
+  - Lines 386-407: CoP→Screen conversion
+  - Lines 545-549: Board layout extraction
+
+Game implementations:
+  - flappy_bird/Scripts/pilot.gd - Lines 25-42
+  - fruit_catcher/Scenes/Paddle/paddle.gd - Lines 46-76
+  - Jumpify/Scripts/2Dplayer.gd - Lines 176-242
+
+================================================================================

@@ -41,9 +41,9 @@ class BOSbutton(QtCore.QObject):
 
     def run(self):
         try:
-            # Simulate board pose detection
+            # Detect board positions
             self.bos_estimator.board_pose_detected_set(self.frame)
-            # print("Finished process button")
+
 
             # Emit the finished signal
             self.finished.emit()
@@ -121,12 +121,15 @@ class ResetButtonProcess(QtCore.QObject):
 
     def stop_worker_thread(self):
         """Stop the worker thread."""
-        if self.worker_thread is not None and self.worker_thread.isRunning():
-            # print("Stopping worker thread...")
-            self.worker_thread.quit()  # Stop the thread's event loop
-            self.worker_thread.wait()  # Wait for the thread to finish
+        if self.worker_thread is not None:
+            if self.worker_thread.isRunning():
+                # print("Stopping worker thread...")
+                self.worker_thread.quit()  # Stop the thread's event loop
+                self.worker_thread.wait()  # Wait for the thread to finish
+            # Always clean up, even if thread finished
             self.worker_thread.deleteLater()
             self.worker_thread = None
+            self.worker = None
             # print("Worker thread stopped.")
 
     def on_worker_done(self):
@@ -134,6 +137,10 @@ class ResetButtonProcess(QtCore.QObject):
         if self.loading_window:
             self.loading_window.close()
             self.loading_window = None  # Clean up the loading window
+
+        # Clean up thread reference for next reset
+        self.worker_thread = None
+        self.worker = None
         # print("Worker finished and loading window closed.")
 
     def show_error_message(self, error_message):

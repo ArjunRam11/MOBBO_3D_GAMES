@@ -174,8 +174,8 @@ class MobboData:
                     if addr in csv_writers and self.data_types.get("cop", False):
                         csv_writers[addr].writerow([current_time, f1, f2, f3, f4, copx, copy, w, w_sync])
 
-                    
-                    
+
+
                     self.foot_recorder.record_frame(self.left_points, self.right_points)
 
                     
@@ -191,8 +191,9 @@ class MobboData:
 
                     break
         finally:
-            for addr in list(csv_files.keys()):
-                self.stop_recording(addr)
+            # DISABLED: File closing operations
+            # for addr in list(csv_files.keys()):
+            #     self.stop_recording(addr)
             self.sock.close()
 
 

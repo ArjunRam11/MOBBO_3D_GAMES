@@ -39,6 +39,9 @@ class GodotBridge:
         self.data_format = data_format
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # CRITICAL FIX: Set socket to non-blocking to prevent deadlock on second reset
+        # This prevents sendto() from blocking if Godot's socket buffer is full
+        self.sock.setblocking(False)
 
         self._running = False
         self._thread = None
@@ -115,6 +118,11 @@ class GodotBridge:
             if self.packets_sent % 100 == 0:
                 logger.debug(f"Sent packet #{self.packets_sent} to Godot: {data}")
 
+        except (BlockingIOError, OSError) as e:
+            # Non-blocking socket would raise BlockingIOError if buffer full
+            # This is OK - skip this packet and continue, Godot will get next one
+            if self.packets_sent % 500 == 0:
+                logger.debug(f"Socket buffer full, skipping packet: {e}")
         except Exception as e:
             logger.error(f"Failed to send data to Godot: {e}")
 
