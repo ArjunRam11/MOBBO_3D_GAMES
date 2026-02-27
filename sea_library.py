@@ -103,20 +103,25 @@ def calculate_angle_3d(point1, point2, point3):
     # Create vectors
     vector1 = np.array(point1) - np.array(point2)
     vector2 = np.array(point3) - np.array(point2)
-    
+
+    norm1 = np.linalg.norm(vector1)
+    norm2 = np.linalg.norm(vector2)
+    if norm1 < 1e-9 or norm2 < 1e-9:
+        return np.nan
+
     # Normalize the vectors
-    vector1_norm = vector1 / np.linalg.norm(vector1)
-    vector2_norm = vector2 / np.linalg.norm(vector2)
-    
+    vector1_norm = vector1 / norm1
+    vector2_norm = vector2 / norm2
+
     # Dot product and angle calculation
     dot_product = np.dot(vector1_norm, vector2_norm)
-    
+
     # Clip to avoid numerical errors outside the [-1, 1] range
     dot_product = np.clip(dot_product, -1.0, 1.0)
-    
+
     # Return the angle in degrees
     angle = np.degrees(np.arccos(dot_product))
-    
+
     return angle
 
 

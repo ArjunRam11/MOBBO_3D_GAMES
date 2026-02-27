@@ -2,6 +2,10 @@ import sys
 import os
 from base_of_support_lib import *
 from sea_library import *
+import numpy as np
+from scipy.spatial import ConvexHull, Delaunay, QhullError
+import pyqtgraph.opengl as gl
+from itertools import combinations
 
 
 # Get the absolute path of the parent directory (root directory MOCAP_CLEAN)
@@ -22,7 +26,8 @@ import pyrealsense2 as rs
 import cv2
  
 from PyQt5 import QtWidgets,QtGui
-from pyqtgraph.Qt import QtCore
+# Keep pyqtgraph on the same Qt binding as the app.
+os.environ.setdefault("PYQTGRAPH_QT_LIB", "PyQt5")
 import pyqtgraph.opengl as gl
 
 from noisecancellation import *
@@ -163,23 +168,17 @@ class ArUco3DVisualizer(QtWidgets.QWidget):
 
         # Define default colors for each item type
         self.default_colors = {
-            'cop1': (255, 0, 0, 128),    # Semi-transparent red for cop1
-              
+            'cop1': (255, 0, 0, 128),    # Semi-transparent red for cop1      
             'gcop1': (0, 0, 255, 128)    # Semi-transparent blue for gcop1
         }
-
-
-
-
         load_colors()
 
     def class_initilize(self):
         
         self.keypoint_data_window = KeypointDataWindow()
-        self.mobbo=MobboData()
+        from COP_wifi_data import get_mobbo_instance
+        self.mobbo=get_mobbo_instance()
         # self.foot_graph_updater=FootGraphUpdater()
-
-        
         # self.bos_estimator = BOSEstimator()
         
         
@@ -227,6 +226,11 @@ class ArUco3DVisualizer(QtWidgets.QWidget):
  
        
         self.data_logging_class=DataLogging(button_layout,self.mobbo)
+
+        # Give BOSEstimator a reference to DataLogging so that when Godot sends
+        # 'set_patient' the hospital ID is auto-filled in the Python UI
+        # if hasattr(self, 'bos_estimator'):
+        #     self.bos_estimator.set_data_logging(self.data_logging_class)
        
  
 
@@ -309,10 +313,6 @@ class ArUco3DVisualizer(QtWidgets.QWidget):
 
         
         self.gcop1_mesh = gl.GLMeshItem()
-
-         
-
-         
         self.gcop__1 = gl.GLScatterPlotItem()
         self.view.addItem(self.gcop__1)
         self.view.addItem(self.gcop1_mesh)
@@ -486,8 +486,6 @@ class ArUco3DVisualizer(QtWidgets.QWidget):
         self.view.addItem(text_item)
         self.text_label.append(text_item)
 
-
-
     # show the center point of text||
 
     def create_text_item_center(self, name, position):
@@ -512,9 +510,7 @@ class ArUco3DVisualizer(QtWidgets.QWidget):
             text_item.text = text_item.text  
             text_item.font = QtGui.QFont('Helvetica', new_font_size)   
 
-
-
-    # camer switch process
+    # camera switch process
     
     def toggle_camera(self):
         if self.camera_widget.isVisible():
@@ -594,23 +590,14 @@ class ArUco3DVisualizer(QtWidgets.QWidget):
 
             self.cop.update_all_cops(self.cop_and_weight)
              
-
-             
-                
-              
-               
-
+          
     
     def cop_and_gcop_update(self,cop_and_weight,weight ):
 
 
-        self.cop_and_weight=cop_and_weight
-         
+        self.cop_and_weight=cop_and_weight 
         self.weight=weight
-
-        
-
-         
+    
     def camera_update(self, latest_frame):
         
 
@@ -641,9 +628,6 @@ class ArUco3DVisualizer(QtWidgets.QWidget):
             angle_label = gl.GLTextItem(text=f"{angle:.2f}°",  pos=(x,y,z))  # Yellow color
             self.view.addItem(angle_label)
             self.angle_labels.append(angle_label)
-
-     
-   
 
     def update_keypoint_labels(self, keypoints):
         self.clear_text_labels()  # Clear existing labels
@@ -778,15 +762,21 @@ class ArUco3DVisualizer(QtWidgets.QWidget):
         """
         Update scatter plot points for heel and toe visualization.
         """
-        scatter_item.setData(pos=np.array(points), size=10, color=(1, 0, 0, 1))
+        pts = np.asarray(points, dtype=float)
+        if pts.ndim == 1:
+            pts = pts.reshape(1, -1)
+        elif pts.ndim == 3 and pts.shape[1] == 1:
+            pts = pts.reshape(pts.shape[0], pts.shape[2])
+
+        if pts.shape[1] > 3:
+            pts = pts[:, :3]
+        elif pts.shape[1] < 3:
+            return
+
+        scatter_item.setData(pos=pts, size=10, color=(1, 0, 0, 1))
 
     def update_mesh_foot_plot(self,mesh_item,foot_points):
 
-       
-        import numpy as np
-        from scipy.spatial import ConvexHull, Delaunay
-        import pyqtgraph.opengl as gl
-        from itertools import combinations
 
         if foot_points is None:
             print("foot_points is None")  # Debug: None check
@@ -800,10 +790,25 @@ class ArUco3DVisualizer(QtWidgets.QWidget):
         mesh_item.setVisible(True)
 
     def area_polygon(self, combined_points):
+        points = np.asarray(combined_points, dtype=float)
+        if points.ndim != 2 or points.shape[1] < 2:
+            self.area_label.setText("Area : 0.00000 m²")
+            return
 
+        projected_points = points[:, :2]
+        valid_mask = np.isfinite(projected_points).all(axis=1)
+        projected_points = projected_points[valid_mask]
 
-        projected_points = combined_points[:, :2]
-        hull = ConvexHull(projected_points)
+        if projected_points.shape[0] < 3:
+            self.area_label.setText("Area : 0.00000 m²")
+            return
+
+        try:
+            hull = ConvexHull(projected_points, qhull_options='QJ')
+        except QhullError:
+            self.area_label.setText("Area : 0.00000 m²")
+            return
+
         hull_vertices = projected_points[hull.vertices]
         polygon_area = 0.5 * np.abs(
             np.dot(hull_vertices[:, 0], np.roll(hull_vertices[:, 1], 1)) -
@@ -814,22 +819,37 @@ class ArUco3DVisualizer(QtWidgets.QWidget):
 
     def hull_shape_find_and_draw (self,combined_points):
 
-
-        self.area_polygon(combined_points)
-        jogging = np.random.uniform(-1e-6, 1e-6, size=(combined_points.shape[0], 1))
-        adjusted_points = combined_points + np.hstack([np.zeros((combined_points.shape[0], 2)), jogging])
-        hull = ConvexHull(adjusted_points)
         for lines in self.polygon_line_plot:
             self.view.removeItem(lines)
         self.polygon_line_plot.clear()
-        hull_points = hull.points [ hull.vertices]
+
+        self.area_polygon(combined_points)
+
+        points = np.asarray(combined_points, dtype=float)
+        if points.ndim != 2 or points.shape[1] < 2:
+            return
+
+        projected_points = points[:, :2]
+        valid_mask = np.isfinite(projected_points).all(axis=1)
+        projected_points = projected_points[valid_mask]
+        points = points[valid_mask]
+
+        if projected_points.shape[0] < 3:
+            return
+
+        try:
+            hull = ConvexHull(projected_points, qhull_options='QJ')
+        except QhullError:
+            return
+
+        hull_xy = projected_points[hull.vertices]
+        if points.shape[1] >= 3:
+            hull_z = points[hull.vertices, 2:3]
+        else:
+            hull_z = np.zeros((hull_xy.shape[0], 1))
+
+        hull_points = np.hstack([hull_xy, hull_z])
         closed_hull_points = np.vstack([hull_points, hull_points[0]])
         line_item = gl.GLLinePlotItem(pos=closed_hull_points, color=(0.25, 0.88, 0.82, 1), width=6, mode='line_strip')
         self.view.addItem(line_item)
         self.polygon_line_plot.append(line_item)
-    
-
-
-
-
- 

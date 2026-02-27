@@ -69,6 +69,19 @@ class BOSWorker(QtCore.QObject):
             frame_thread = threading.Thread(target=self.frame.run_frame, args=(1280, 720))
             frame_thread.start()
 
+            # Wait for first valid camera frame before board detection.
+            frame_deadline = time.time() + 10.0
+            while time.time() < frame_deadline:
+                color_frame, depth_frame = self.frame.get_Frames()
+                if color_frame is not None and depth_frame is not None:
+                    break
+                time.sleep(0.05)
+            else:
+                raise RuntimeError(
+                    "Camera did not produce frames within 10 seconds. "
+                    "Check RealSense connection and whether another app is using the camera."
+                )
+
             # Start BOS estimator thread
             self.bos_estimator.Cop_thread = threading.Thread(target=self.bos_estimator.mobbo.get_device_data)
             self.bos_estimator.Cop_thread.start()

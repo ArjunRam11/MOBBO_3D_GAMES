@@ -9,80 +9,56 @@ from aruco_data import*
 import math 
 
 
-def create_foot_polygon_3d(   origin, vector2, foot_length, heel_breadth, metacarpal_breadth, metacarpal_height, big_toe_ratio=0.18, pinky_toe_ratio=0.1, is_left=False):
-        import numpy as np
-        from scipy.spatial import ConvexHull, Delaunay
-        import pyqtgraph.opengl as gl
-        from itertools import combinations
+def create_foot_polygon_3d(origin, vector2, foot_length, heel_breadth, metacarpal_breadth,
+                           metacarpal_height, big_toe_ratio=0.18, pinky_toe_ratio=0.1,
+                           is_left=False):
+        # origin: toe point, vector2: heel point (both in reference-board frame)
+        toe = np.asarray(origin, dtype=float).reshape(-1)[:3]
+        heel = np.asarray(vector2, dtype=float).reshape(-1)[:3]
 
-        # print("the foot polygon function of inside")
+        if toe.shape[0] < 3 or heel.shape[0] < 3:
+            return None, None
 
-         
-        origin = np.asarray(origin) #toe   
-        vector2 = np.asarray(vector2)   #heel
+        foot_vec_xy = toe[:2] - heel[:2]  # heel -> toe direction
+        measured_length = np.linalg.norm(foot_vec_xy)
+        if measured_length < 1e-9:
+            forward_xy = np.array([1.0, 0.0], dtype=float)
+            measured_length = float(foot_length)
+        else:
+            forward_xy = foot_vec_xy / measured_length
 
-         
-        if origin.ndim == 2 and origin.shape[0] == 1:
-            origin = origin.flatten()
-        if vector2.ndim == 2 and vector2.shape[0] == 1:
-            vector2 = vector2.flatten()
+        left_xy = np.array([-forward_xy[1], forward_xy[0]], dtype=float)
 
-         
-        direction_vector = vector2 - origin
-        angle = np.arctan2(direction_vector[1], direction_vector[0])
+        # Keep forefoot slightly behind toe tip while staying anchored to measured keypoints.
+        toe_inset = float(np.clip(metacarpal_height, 0.0, 0.25 * max(float(foot_length), 1e-6)))
+        metacarpal_center_xy = toe[:2] - forward_xy * toe_inset
+        heel_center_xy = heel[:2]
 
-        z_level = origin[2]
-        metacarpal_center = np.array([origin[0], origin[1], z_level])
-        metacarpal_to_heel_length = foot_length * 0.7
-        heel_center = metacarpal_center + np.array(
-            [metacarpal_to_heel_length * np.cos(angle), metacarpal_to_heel_length * np.sin(angle), 0]
-        )
+        heel_left_xy = heel_center_xy + left_xy * (heel_breadth * 0.5)
+        heel_right_xy = heel_center_xy - left_xy * (heel_breadth * 0.5)
+        metacarpal_left_xy = metacarpal_center_xy + left_xy * (metacarpal_breadth * 0.5)
+        metacarpal_right_xy = metacarpal_center_xy - left_xy * (metacarpal_breadth * 0.5)
 
-        # Calculate corners
-        heel_left = heel_center + np.array([-heel_breadth / 2 * np.sin(angle), heel_breadth / 2 * np.cos(angle), 0])
-        heel_right = heel_center + np.array([heel_breadth / 2 * np.sin(angle), -heel_breadth / 2 * np.cos(angle), 0])
-        metacarpal_left = metacarpal_center + np.array(
-            [-metacarpal_breadth / 2 * np.sin(angle), metacarpal_breadth / 2 * np.cos(angle), 0]
-        )
-        metacarpal_right = metacarpal_center + np.array(
-            [metacarpal_breadth / 2 * np.sin(angle), -metacarpal_breadth / 2 * np.cos(angle), 0]
-        )
+        model_length = max(float(foot_length), measured_length)
+        big_toe_length = (pinky_toe_ratio if is_left else big_toe_ratio) * model_length
+        pinky_toe_length = (big_toe_ratio if is_left else pinky_toe_ratio) * model_length
 
-        # Big toe and pinky toe points
-        big_toe_length = (pinky_toe_ratio if is_left else big_toe_ratio) * foot_length
-        pinky_toe_length = (big_toe_ratio if is_left else pinky_toe_ratio) * foot_length
+        big_toe_xy = metacarpal_right_xy + forward_xy * big_toe_length
+        pinky_toe_xy = metacarpal_left_xy + forward_xy * pinky_toe_length
 
-        big_toe_point = metacarpal_right - np.array([big_toe_length * np.cos(angle), big_toe_length * np.sin(angle), 0])
-        pinky_toe_point = metacarpal_left - np.array([pinky_toe_length * np.cos(angle), pinky_toe_length * np.sin(angle), 0])
+        z_level = float(np.nanmean([toe[2], heel[2]]) - metacarpal_height)
+        foot_points = np.array([
+            [heel_left_xy[0], heel_left_xy[1], z_level],
+            [heel_right_xy[0], heel_right_xy[1], z_level],
+            [metacarpal_right_xy[0], metacarpal_right_xy[1], z_level],
+            [big_toe_xy[0], big_toe_xy[1], z_level],
+            [pinky_toe_xy[0], pinky_toe_xy[1], z_level],
+            [metacarpal_left_xy[0], metacarpal_left_xy[1], z_level],
+        ], dtype=float)
 
-        foot_points = np.array([heel_left, heel_right, metacarpal_right, big_toe_point, pinky_toe_point, metacarpal_left])
-        # left = np.array([heel_left, heel_right, metacarpal_right, big_toe_point, pinky_toe_point, metacarpal_left])
-        left = np.array([  heel_right, metacarpal_right, big_toe_point, pinky_toe_point ])
-        right = np.array([big_toe_point,pinky_toe_point,metacarpal_left,heel_left ])
-        # left = np.array([heel_left, heel_right, metacarpal_right, big_toe_point, pinky_toe_point ])
-        # right = np.array([big_toe_point,pinky_toe_point,metacarpal_left,heel_left,heel_right ])
-        # right = np.array([heel_left, heel_right, metacarpal_right, big_toe_point, pinky_toe_point, metacarpal_left])
-         
-        
-        # foot_polygons_point=np.array([heel_left])
-        z_offset = vector2[2] - metacarpal_height
-        foot_points[:, 2] = z_offset  # Adjust Z-coordinates
-        left[:, 2] = z_offset  # Adjust Z-coordinates
-        right[:, 2] = z_offset  # Adjust Z-coordinates
-
-
-        # foot_points[:, 2] = 0.001  # Adjust Z-coordinates
-        # left[:, 2] = 0.001  # Adjust Z-coordinates
-        # right[:, 2] = 0.001 # Adjust Z-coordinates
-
-
-        foot_polygons_point=left if is_left else right
-
-        # print("foot_points: ",  foot_points)
-
-        
-
-        return(foot_polygons_point,foot_points)
+        # Use full foot boundary for BOS hull construction.
+        foot_polygons_point = foot_points.copy()
+        return foot_polygons_point, foot_points
 
 
 

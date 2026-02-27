@@ -1,0 +1,15 @@
+keyboard
+matplotlib
+mediapipe
+msgpack_numpy
+msgpack_python
+numpy
+opencv_contrib_python
+pyautogui
+PyQt5
+PyQt5_sip
+pyqtgraph
+pyrealsense2
+scipy
+ultralytics
+pyinstaller

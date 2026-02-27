@@ -58,9 +58,26 @@ def camera_functions(pipeline,mat,dist):
     pixelregion_corner = [(0.1, -0.125, 0), (-0.1,-0.125, 0), (-0.1, -0.225, 0), (0.1, -0.225, 0)]
 
     board_setupdata={'board_corners':[],'ids':[], 'led_regions':[],'board_3dpos':[],'centre':[],'rotation_matrices':[]}
+    frame_deadline = time.time() + 10.0
     while True:
             
             color_frame,frame_depth=pipeline.get_Frames()
+            if color_frame is None or frame_depth is None:
+                if time.time() > frame_deadline:
+                    raise RuntimeError(
+                        "No valid camera frame received during board setup."
+                    )
+                time.sleep(0.05)
+                continue
+
+            if not hasattr(color_frame, "size") or color_frame.size == 0:
+                if time.time() > frame_deadline:
+                    raise RuntimeError(
+                        "Received empty color frame during board setup."
+                    )
+                time.sleep(0.05)
+                continue
+
             image=cv2.cvtColor(color_frame,   cv2.COLOR_BGR2RGB)
             image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 

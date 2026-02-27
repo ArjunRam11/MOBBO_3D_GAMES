@@ -1,23 +1,28 @@
-from PyQt5 import QtWidgets, QtGui
-import os
-from datetime import datetime
-  
+"""
+user_input.py — Patient name input widget.
+
+Session folder creation is now handled entirely by SessionManager.
+This widget only handles the UI (label, text field, submit button).
+"""
+
+from PyQt5 import QtWidgets, QtCore
+from PyQt5.QtCore import QMetaObject, Qt, Q_ARG
+from session_manager import get_session_manager
+
+
 class UserInput(QtWidgets.QWidget):
     def __init__(self, layout):
-        super().__init__() 
-        # self.mobbo_instance = MobboData()
-        
-        self.user_name = None
-        self.session_path = None  # Store the session path
-        
+        super().__init__()
 
-        # Label
+        self.user_name = None
+
+        # ── Label ─────────────────────────────────────────────────────────
         self.label = QtWidgets.QLabel("Enter Name/ID:")
         self.label.setStyleSheet("color: white; font-size: 12px;")
-        self.label.setFixedSize(150, 30) 
+        self.label.setFixedSize(150, 30)
         layout.addWidget(self.label)
 
-        # Input Field
+        # ── Input Field ───────────────────────────────────────────────────
         self.input_field = QtWidgets.QLineEdit()
         self.input_field.setPlaceholderText("Type here...")
         self.input_field.setStyleSheet("""
@@ -29,105 +34,103 @@ class UserInput(QtWidgets.QWidget):
         self.input_field.setFixedSize(150, 30)
         layout.addWidget(self.input_field)
 
-        # Submit Button
+        # ── Submit Button ─────────────────────────────────────────────────
         self.submit_button = QtWidgets.QPushButton("Submit")
         self.submit_button.setFixedSize(100, 30)
         self.submit_button.setStyleSheet("""
             QPushButton {
-                background-color: black; 
-                color: white; 
+                background-color: black;
+                color: white;
                 border: 2px solid white;
-                padding: 5px; 
+                padding: 5px;
                 font-size: 14px;
             }
-            QPushButton:hover {
-                background-color: gray; /* Button highlights on hover */
-                border-color: white;
-            }
-            QPushButton:pressed {
-                background-color: white; /* Button flashes white on click */
-                color: black;
-            }
+            QPushButton:hover  { background-color: gray; border-color: white; }
+            QPushButton:pressed { background-color: white; color: black; }
         """)
         self.submit_button.clicked.connect(self.process_data)
         layout.addWidget(self.submit_button)
 
-        # Set global stylesheet
         self.setStyleSheet("QWidget { background-color: black; }")
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # Manual submit (operator types name and clicks Submit)
+    # ─────────────────────────────────────────────────────────────────────────
     def process_data(self):
-        """ Process user input, set the user name, and create a session folder. """
         user_input = self.input_field.text().strip()
-        # if not user_input:
-        #     self.show_popup("Error", "User name cannot be empty!", QtWidgets.QMessageBox.Warning)
-        #     return
-        
-        # Show confirmation dialog before proceeding
-        confirm = self.show_popup("Confirmation", f"Proceed with name: {user_input}?", QtWidgets.QMessageBox.Question, True)
+        if not user_input:
+            return
+
+        confirm = self._show_popup(
+            "Confirmation",
+            f"Proceed with name: {user_input}?",
+            QtWidgets.QMessageBox.Question,
+            confirmation=True
+        )
         if not confirm:
-            return  # If user clicks "Cancel", stop the process
+            return
 
         self.user_name = user_input
-        
 
-        self.create_session_folder()
+        # Start session via SessionManager (safe — idempotent for same patient)
+        mgr = get_session_manager()
+        mgr.start_session(user_input)
+        print(f"✅ UserInput: session started for '{user_input}' → {mgr.session_path}")
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # Called from DataLogging when Godot sends set_patient (auto-fill)
+    # ─────────────────────────────────────────────────────────────────────────
+    def set_name_from_godot(self, hospital_id: str):
+        """Thread-safe: queues a UI update to the main thread."""
+        self.user_name = hospital_id.strip()
+        QMetaObject.invokeMethod(
+            self,
+            "_apply_godot_name",
+            Qt.QueuedConnection,
+            Q_ARG(str, hospital_id.strip())
+        )
+        print(f"👤 UserInput: name queued from Godot → '{hospital_id}'")
 
-        # Create session folder inside user directory
-        
+    @QtCore.pyqtSlot(str)
+    def _apply_godot_name(self, hospital_id: str):
+        """Runs on main thread — updates the visible input field."""
+        self.input_field.setText(hospital_id)
+        self.input_field.setStyleSheet("""
+            background-color: #003300;
+            color: #00ff00;
+            border: 1px solid #00ff00;
+            padding: 5px;
+        """)
+        print(f"✅ UserInput: UI field set to '{hospital_id}'")
 
-    def create_session_folder(self):
-        """ Create session folder in the format session1_date_time inside Mobbo_data/{user}/ """
-        base_path = os.path.join(os.getcwd(), "Mobbo_data", self.user_name)
-        os.makedirs(base_path, exist_ok=True)
+    def force_set_name(self, hospital_id: str):
+        """Commit a name programmatically (called just before recording starts)."""
+        self.user_name = hospital_id.strip()
+        QMetaObject.invokeMethod(
+            self,
+            "_apply_godot_name",
+            Qt.QueuedConnection,
+            Q_ARG(str, self.user_name)
+        )
+        print(f"✅ UserInput: name committed → '{self.user_name}'")
 
-        existing_sessions = [
-            folder for folder in os.listdir(base_path) if folder.startswith("session")
-        ]
+    # ─────────────────────────────────────────────────────────────────────────
+    # Accessors
+    # ─────────────────────────────────────────────────────────────────────────
+    def get_user_name(self) -> str:
+        return self.user_name
 
-        next_session_num = 1  # Default to 1
-        if existing_sessions:
-            session_numbers = []
-            for folder in existing_sessions:
-                try:
-                    # Extract session number from folder name: "session{N}_..."
-                    session_part = folder.split('_')[0]  # Get "sessionN"
-                    if len(session_part) > 7:  # "session" is 7 chars
-                        num_str = session_part[7:]
-                        if num_str.isdigit():
-                            session_numbers.append(int(num_str))
-                except (ValueError, IndexError):
-                    # Skip folders that don't match the expected pattern
-                    continue
-
-            if session_numbers:
-                next_session_num = max(session_numbers) + 1
-
-        date_time_str = datetime.now().strftime("%d%m%Y_%H%M%S")
-        session_folder = f"session{next_session_num}_{date_time_str}"
-        self.session_path = os.path.join(base_path, session_folder)  # Store session path
-
-        os.makedirs(self.session_path, exist_ok=True)
-        
-       
-    def show_popup(self, title, message, icon, confirmation=False):
-        """ Show a popup message. If confirmation=True, returns True/False based on user choice. """
+    # ─────────────────────────────────────────────────────────────────────────
+    # Popup helper
+    # ─────────────────────────────────────────────────────────────────────────
+    def _show_popup(self, title, message, icon, confirmation=False):
         msg = QtWidgets.QMessageBox()
         msg.setIcon(icon)
         msg.setWindowTitle(title)
         msg.setText(message)
-        
         if confirmation:
             msg.setStandardButtons(QtWidgets.QMessageBox.Ok | QtWidgets.QMessageBox.Cancel)
-            response = msg.exec_()
-            return response == QtWidgets.QMessageBox.Ok
+            return msg.exec_() == QtWidgets.QMessageBox.Ok
         else:
             msg.setStandardButtons(QtWidgets.QMessageBox.Ok)
             msg.exec_()
-
-    def get_session_path(self):
-        """ Get the session path. """
-        return self.session_path
-
-    def get_user_name(self):
-        return self.user_name

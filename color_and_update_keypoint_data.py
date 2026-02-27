@@ -1,8 +1,8 @@
 from PyQt5 import QtWidgets,QtGui
+from PyQt5 import QtCore
 from PyQt5.QtGui import QImage, QPixmap,QColor, QPainter
 from PyQt5.QtWidgets import QColorDialog, QComboBox, QPushButton
 import json
-from pyqtgraph.Qt import QtCore
 
 
 

@@ -1,12 +1,6 @@
- 
-     
-
-
-
 import os
 import cv2
 import time
-
 from _mobbo_setup_utilities import*
 from aruco_realsense_related_utils import *
 
@@ -57,7 +51,11 @@ class ImageCaptureManager:
        
         board_pos = self.polygon['board_3dpos'][0]
         board_rot = self.polygon['rotation_matrices']
-        board_ids = self.polygon['ids'][0]
+        raw_ids = self.polygon['ids'][0]
+
+        # Filter ids to only the known valid marker IDs (11, 44, 68, 88)
+        VALID_MARKER_IDS = {11, 44, 68, 88}
+        board_ids = [int(i) for i in np.array(raw_ids).flatten() if int(i) in VALID_MARKER_IDS]
         if len(board_ids)!=len(addresses)!=len(board_pos):
             print("board id len=", len(board_ids), "board_pos len=",len(board_pos),"address len=", len(addresses))
             # if not addresses:
