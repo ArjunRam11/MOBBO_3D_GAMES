@@ -932,6 +932,9 @@ class BOSEstimator:
                     # Update Python 3D visualiser
                     if self.visualizer:
                         self.visualizer.cop_and_gcop_update(self.all_cops, total_weight)
+                    # Update 2-D split visualiser
+                    if hasattr(self, 'visualizer_2d') and self.visualizer_2d:
+                        self.visualizer_2d.cop_and_gcop_update(self.all_cops, total_weight)
 
                     # Update shared array for other modules
                     with data_lock:
@@ -939,15 +942,15 @@ class BOSEstimator:
                             gcop1[:] = Gcop.flatten()
 
                     # ── Print CoP to console (throttled: every ~0.5 s) ──────
-                    # self._cop_print_counter = getattr(self, '_cop_print_counter', 0) + 1
-                    # if self._cop_print_counter >= 50:   # 50 × 10 ms ≈ 0.5 s
-                    #     self._cop_print_counter = 0
-                    #     gf = Gcop.flatten()
-                    #     line = f"[CoP] GCoP x={gf[0]:+.1f}  y={gf[1]:+.1f}  W={total_weight:.2f}"
-                    #     for i, (cv, cw) in enumerate(self.all_cops):
-                    #         cf = cv.flatten()
-                    #         line += f"   | Board{i+1}: x={cf[0]:+.1f} y={cf[1]:+.1f} w={cw:.2f}"
-                    #     print(line)
+                    self._cop_print_counter = getattr(self, '_cop_print_counter', 0) + 1
+                    if self._cop_print_counter >= 50:   # 50 × 10 ms ≈ 0.5 s
+                        self._cop_print_counter = 0
+                        gf = Gcop.flatten()
+                        line = f"[CoP] GCoP x={gf[0]:+.1f}  y={gf[1]:+.1f}  W={total_weight:.2f}"
+                        for i, (cv, cw) in enumerate(self.all_cops):
+                            cf = cv.flatten()
+                            line += f"   | Board{i+1}: x={cf[0]:+.1f} y={cf[1]:+.1f} w={cw:.2f}"
+                        print(line)
 
                     # ── 3. Stream to Godot (port 8000) ─────────────────────
                     local_cops_data = []
@@ -997,13 +1000,26 @@ class BOSEstimator:
         def _valid(v):
             return v is not None and not np.isnan(np.asarray(v)).any()
 
+        def _project_to_board_plane(v):
+            """
+            Zero the Z component of a ref-board-frame keypoint so the foot
+            polygon is drawn on the board surface (Z=0) rather than at foot
+            height above the board.  The foot is ~2-5 cm above the board; at
+            the camera angle this creates a visible Y-shift without projection.
+            """
+            arr = np.asarray(v, dtype=np.float64).flatten()
+            arr[2] = 0.0
+            return arr.reshape(1, 3)
+
         if foot_keys:
             # Right foot
             if _valid(right_big_ref) and _valid(right_mid_ref) and _valid(right_heel_ref):
                 try:
                     poly_xy = ReconstructFootFromNormalizedVectors(
                         foot_normalized_projected_vectors,
-                        right_big_ref, right_mid_ref, right_heel_ref,
+                        _project_to_board_plane(right_big_ref),
+                        _project_to_board_plane(right_mid_ref),
+                        _project_to_board_plane(right_heel_ref),
                         FOOT_LENGTH, FOOT_WIDTH
                     )
                     if poly_xy is not None and not np.isnan(poly_xy).all():
@@ -1019,7 +1035,9 @@ class BOSEstimator:
                 try:
                     poly_xy = ReconstructFootFromNormalizedVectors(
                         foot_normalized_projected_vectors,
-                        left_big_ref, left_mid_ref, left_heel_ref,
+                        _project_to_board_plane(left_big_ref),
+                        _project_to_board_plane(left_mid_ref),
+                        _project_to_board_plane(left_heel_ref),
                         FOOT_LENGTH, FOOT_WIDTH
                     )
                     if poly_xy is not None and not np.isnan(poly_xy).all():
@@ -1198,6 +1216,8 @@ class BOSEstimator:
 
                 if image1 is not None and self.visualizer:
                     self.visualizer.camera_update(image1)
+                    if hasattr(self, 'visualizer_2d') and self.visualizer_2d:
+                        self.visualizer_2d.camera_update(image1)
 
             except Exception:
                 pass
@@ -1243,6 +1263,10 @@ def main():
         visualizer    = ArUco3DVisualizer(bos_estimator)
         bos_estimator.set_visualizer(visualizer)
 
+        # ── 2-D split window (camera feed + top-down CoP/foot/board plot) ─────
+        from Visualiser_2D import Visualizer2D
+        bos_estimator.visualizer_2d = Visualizer2D(bos_estimator)
+
         # Wire DataLogging → enables Godot patient ID to pre-fill the name field
         # and allows Godot game to trigger recording start/stop
         bos_estimator.set_data_logging(visualizer.data_logging_class)
@@ -1254,6 +1278,7 @@ def main():
         def on_worker_finished():
             loading_window.close()
             visualizer.show()
+            bos_estimator.visualizer_2d.show()
             logger.info("Application initialisation completed")
 
         def on_worker_error(error_msg):
