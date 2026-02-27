@@ -64,8 +64,8 @@ from session_manager import get_session_manager
 # FOOT GEOMETRY CONSTANTS
 # ════════════════════════════════════════════════════════════════════════════════
 
-FOOT_LENGTH = 0.26   # metres
-FOOT_WIDTH  = 0.10   # metres
+FOOT_LENGTH = 0.25   # metres
+FOOT_WIDTH  = 0.09   # metres
 
 _foot_geometry_path = fr'e:\OpenCV_mobbo_works\BaseOfSupport\notebooks\BOS_validation'
 FootGeometryfile    = 'normalized_projected_vectors.pickle'
@@ -85,7 +85,7 @@ CONFIG = {
         'ERROR_RECOVERY': 0.1
     },
     'FOOT_PARAMS': {
-        'LENGTH': 0.27, 'WIDTH': 0.07, 'TOE_WIDTH': 0.1, 'HEIGHT': 0.020
+        'LENGTH': 0.25, 'WIDTH': 0.06, 'TOE_WIDTH': 0.1, 'HEIGHT': 0.020
     },
     'ROTATION_180': np.array([[-1, 0, 0], [0, -1, 0], [0, 0, 1]], dtype=np.float32),
     'BOARD_DIMS': {

@@ -227,13 +227,13 @@ class foot_detector():
                         continue
 
                     # Draw crop box so we can see what YOLO is looking at
-                    cv2.rectangle(color_image,
-                                  (x_min, y_min), (x_max, y_max),
-                                  (200, 200, 0), 2)
-                    cv2.putText(color_image, f"ID:{marker_id}",
-                                (x_min + 4, y_min + 18),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                                (200, 200, 0), 2, cv2.LINE_AA)
+                    # cv2.rectangle(color_image,
+                    #               (x_min, y_min), (x_max, y_max),
+                    #               (200, 200, 0), 2)
+                    # cv2.putText(color_image, f"ID:{marker_id}",
+                    #             (x_min + 4, y_min + 18),
+                    #             cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                    #             (200, 200, 0), 2, cv2.LINE_AA)
 
                     cropped = color_image[y_min:y_max, x_min:x_max]
                     resized = cv2.resize(cropped, (640, 480))
