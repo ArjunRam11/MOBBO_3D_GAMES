@@ -19,10 +19,9 @@ BOARD = aruco.GridBoard(
     dictionary=ARUCO_DICT
 )
 
-# Camera calibration
-# RS_CAM_MAT_455 = np.array([[638.706, 0, 650.238], [0, 638.706, 350.136], [0, 0, 1]])  # for d455 camera
 
-RS_CAM_MAT_455 = np.array([[645.733, 0, 646.046], [0, 645.733,  361.666], [0, 0, 1]])  # for d455 camera
+
+RS_CAM_MAT_455 = np.array([[658.224, 0, 644.746], [0, 658.224,  361.722], [0, 0, 1]])  # for d455 camera
 MAT = RS_CAM_MAT_455.reshape(3, 3)
 DIST = np.zeros((1, 5))
 

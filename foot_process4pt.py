@@ -345,7 +345,7 @@ class foot_detector():
             self.image = color_image
 
             # ── Live debug window (full frame) ────────────────────────────
-            cv2.imshow("Foot Detection – Full Frame", color_image)
+            # cv2.imshow("Foot Detection – Full Frame", color_image)
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break

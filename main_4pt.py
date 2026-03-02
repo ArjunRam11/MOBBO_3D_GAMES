@@ -1264,8 +1264,8 @@ def main():
         bos_estimator.set_visualizer(visualizer)
 
         # ── 2-D split window (camera feed + top-down CoP/foot/board plot) ─────
-        from Visualiser_2D import Visualizer2D
-        bos_estimator.visualizer_2d = Visualizer2D(bos_estimator)
+        # from Visualiser_2D import Visualizer2D
+        # bos_estimator.visualizer_2d = Visualizer2D(bos_estimator)
 
         # Wire DataLogging → enables Godot patient ID to pre-fill the name field
         # and allows Godot game to trigger recording start/stop
@@ -1278,7 +1278,7 @@ def main():
         def on_worker_finished():
             loading_window.close()
             visualizer.show()
-            bos_estimator.visualizer_2d.show()
+            # bos_estimator.visualizer_2d.show()
             logger.info("Application initialisation completed")
 
         def on_worker_error(error_msg):

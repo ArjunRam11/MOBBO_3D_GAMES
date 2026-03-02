@@ -1,10 +1,11 @@
-import math
+from aruco_realsense import *
 import time
 import cv2
 from cv2 import aruco
 import numpy as np 
-from _mobbo_setup_utilities import *
-import os
+from _mobbo_setup_utilities import * 
+
+
  
 aruco_dict = cv2.aruco.getPredefinedDictionary(aruco.DICT_ARUCO_ORIGINAL)
 h=720
@@ -20,7 +21,7 @@ board = aruco.GridBoard(
         markerSeparation=markerSeperation,
         dictionary=ARUCO_DICT)
 
-rotation_vectors, translation_vectors = None, None
+rotation_vectors, translation_vectors = None, None  
 axis = np.float32([[-.5, -.5, 0], [-.5, .5, 0], [.5, .5, 0], [.5, -.5, 0],
                    [-.5, -.5, 1], [-.5, .5, 1], [.5, .5, 1], [.5, -.5, 1]])
 marker_size = markerLength
@@ -29,10 +30,8 @@ marker_points = np.array([[-marker_size / 2, marker_size / 2, 0],
                             [marker_size / 2, -marker_size / 2, 0],
                             [-marker_size / 2, -marker_size / 2, 0]], dtype=np.float32)
 
-rs_cam_mat_455=np.array([[638.706,0,650.238],[0,638.706,350.136],[0,0,1]]) #for d455 camera
-mat = rs_cam_mat_455.reshape(3,3)
-dist = np.zeros((1,5))
-
+mat = MAT
+dist = DIST
 
 def my_estimatePoseSingleMarkers(corners, marker_points, mtx, distortion):
 
