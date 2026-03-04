@@ -41,11 +41,18 @@ class BOSbutton(QtCore.QObject):
 
     def run(self):
         try:
-            # Detect board positions
+            # ── Full reset sequence ───────────────────────────────────────
+            # 1. Stop all running threads so the board detection has a clean slate
+            self.bos_estimator.stop_all_threads()
+            time.sleep(0.5)  # Let threads fully exit
+
+            # 2. Re-detect boards (updates board_points_3d, relative transforms, etc.)
             self.bos_estimator.board_pose_detected_set(self.frame)
 
+            # 3. Restart CoP + ArUco threads (reset_all_threads does this without
+            #    re-running board detection a second time)
+            self.bos_estimator.restart_cop_and_aruco_threads()
 
-            # Emit the finished signal
             self.finished.emit()
 
         except Exception as e:
@@ -101,6 +108,10 @@ class BOSWorker(QtCore.QObject):
 
 
 class ResetButtonProcess(QtCore.QObject):
+    # Signal emitted on the GUI thread when the reset worker completes.
+    # Graph_window_main connects to this directly — no QThread.isRunning() polling.
+    reset_finished = QtCore.pyqtSignal()
+
     def __init__(self):
         super().__init__()
         self.loading_window = None
@@ -149,12 +160,11 @@ class ResetButtonProcess(QtCore.QObject):
         """Handle worker completion and close the loading window."""
         if self.loading_window:
             self.loading_window.close()
-            self.loading_window = None  # Clean up the loading window
+            self.loading_window = None
 
-        # Clean up thread reference for next reset
-        self.worker_thread = None
-        self.worker = None
-        # print("Worker finished and loading window closed.")
+        # Emit signal so Graph_window_main can restore the Reset Board button.
+        # Do NOT touch worker_thread here — deleteLater() already handles cleanup.
+        self.reset_finished.emit()
 
     def show_error_message(self, error_message):
         """Display error messages in a QMessageBox."""
@@ -173,6 +183,3 @@ class ResetButtonProcess(QtCore.QObject):
         error_box.setStandardButtons(QtWidgets.QMessageBox.Ok)
         error_box.exec_()
         # print("Error displayed:", error_message)
-
-
- 

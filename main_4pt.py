@@ -22,6 +22,7 @@ import socket
 import select
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 from fileloader import *
 
 import numpy as np
@@ -63,8 +64,8 @@ from session_manager import get_session_manager
 # FOOT GEOMETRY CONSTANTS
 # ════════════════════════════════════════════════════════════════════════════════
 
-FOOT_LENGTH = 0.25   # metres
-FOOT_WIDTH  = 0.09   # metres
+FOOT_LENGTH = 0.26   # metres
+FOOT_WIDTH  = 0.10   # metres
 
 _foot_geometry_path = fr'e:\OpenCV_mobbo_works\BaseOfSupport\notebooks\BOS_validation'
 FootGeometryfile    = 'normalized_projected_vectors.pickle'
@@ -84,7 +85,7 @@ CONFIG = {
         'ERROR_RECOVERY': 0.1
     },
     'FOOT_PARAMS': {
-        'LENGTH': 0.25, 'WIDTH': 0.06, 'TOE_WIDTH': 0.1, 'HEIGHT': 0.020
+        'LENGTH': 0.27, 'WIDTH': 0.07, 'TOE_WIDTH': 0.1, 'HEIGHT': 0.020
     },
     'ROTATION_180': np.array([[-1, 0, 0], [0, -1, 0], [0, 0, 1]], dtype=np.float32),
     'BOARD_DIMS': {
@@ -700,6 +701,49 @@ class BOSEstimator:
         process_complete = True
         logger.info("All processing threads started")
 
+    def restart_cop_and_aruco_threads(self):
+        """
+        Restart ONLY the CoP and ArUco threads after a board reset.
+        board_pose_detected_set() has already run — this just restarts
+        the data streaming threads. Safe to call unlimited times.
+        """
+        global stop_threads, stop_flag_aruco
+        logger.info("🔄 restart_cop_and_aruco_threads() — restarting streams after reset")
+
+        stop_threads    = True
+        stop_flag_aruco = True
+
+        try:
+            self._init_command_socket()
+        except Exception as e:
+            logger.warning(f"Command socket reinit warning: {e}")
+
+        # Godot bridge — start is idempotent
+        try:
+            self.godot_bridge.start()
+        except Exception:
+            pass
+
+        # CoP / BOS thread
+        self.bos_thread_running = False
+        time.sleep(0.1)
+        self.bos_thread = threading.Thread(
+            target=self.compute_COP, name="BOS_Thread_RESET", daemon=True
+        )
+        self.bos_thread.start()
+        self.bos_thread_running = True
+        logger.info("✅ BOS/CoP thread restarted")
+
+        # ArUco + foot detection thread
+        self.aruco_thread_ = threading.Thread(
+            target=self.run_aruco,
+            args=(self.visualizer, 1280, 720, MAT, DIST, self.frame),
+            name="ArUco_Thread_RESET", daemon=True
+        )
+        self.aruco_thread_.start()
+        logger.info("✅ ArUco thread restarted")
+        logger.info("✅ restart_cop_and_aruco_threads() complete")
+
     # ─────────────────────────────────────────────────────────────────────────
     # Board detection
     # ─────────────────────────────────────────────────────────────────────────
@@ -1263,7 +1307,7 @@ def main():
         bos_estimator.set_visualizer(visualizer)
 
         # ── 2-D split window (camera feed + top-down CoP/foot/board plot) ─────
-        # from Visualiser_2D import Visualizer2D
+        # from visualizer_2d import Visualizer2D
         # bos_estimator.visualizer_2d = Visualizer2D(bos_estimator)
 
         # Wire DataLogging → enables Godot patient ID to pre-fill the name field
@@ -1277,7 +1321,7 @@ def main():
         def on_worker_finished():
             loading_window.close()
             visualizer.show()
-            # bos_estimator.visualizer_2d.show()
+            bos_estimator.visualizer_2d.show()
             logger.info("Application initialisation completed")
 
         def on_worker_error(error_msg):

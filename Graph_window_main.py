@@ -21,6 +21,7 @@ from COP_wifi_data import *
 from board_pose_estimator import *
 import numpy as np
 import time
+from loading_process_widget import ResetButtonProcess
 
 import pyrealsense2 as rs
 import cv2
@@ -227,10 +228,10 @@ class ArUco3DVisualizer(QtWidgets.QWidget):
        
         self.data_logging_class=DataLogging(button_layout,self.mobbo)
 
-        # Give BOSEstimator a reference to DataLogging so that when Godot sends
-        # 'set_patient' the hospital ID is auto-filled in the Python UI
-        # if hasattr(self, 'bos_estimator'):
-        #     self.bos_estimator.set_data_logging(self.data_logging_class)
+        # Timer controls recording — hide the standalone Start Recording button
+        # so there is only one way to start/stop recording (the timer Start button).
+        if hasattr(self.data_logging_class, 'record_button'):
+            self.data_logging_class.record_button.hide()
        
  
 
@@ -254,9 +255,73 @@ class ArUco3DVisualizer(QtWidgets.QWidget):
         self.reset_button.clicked.connect(self.reset_camera_position)
         button_layout.addWidget(self.reset_button)
 
+        # ── Board reset (can be pressed unlimited times) ────────────────
         self.restart_button = QtWidgets.QPushButton("Reset Board")
         self.restart_button.clicked.connect(self.restart_process)
         button_layout.addWidget(self.restart_button)
+
+        self.reset_status_label = QtWidgets.QLabel("")
+        self.reset_status_label.setStyleSheet("color: #aaaaaa; font-size: 10px;")
+        self.reset_status_label.setFixedSize(150, 20)
+        button_layout.addWidget(self.reset_status_label)
+
+        # ── Session countdown timer ───────────────────────────────────────
+        timer_sep = QtWidgets.QFrame()
+        timer_sep.setFrameShape(QtWidgets.QFrame.HLine)
+        timer_sep.setStyleSheet("color: #555555;")
+        button_layout.addWidget(timer_sep)
+
+        timer_title = QtWidgets.QLabel("Session Timer")
+        timer_title.setStyleSheet("color: white; font-size: 12px; font-weight: bold;")
+        button_layout.addWidget(timer_title)
+
+        # Input row: label + spin box
+        timer_input_row = QtWidgets.QHBoxLayout()
+        timer_input_lbl = QtWidgets.QLabel("Seconds:")
+        timer_input_lbl.setStyleSheet("color: white; font-size: 11px;")
+        timer_input_row.addWidget(timer_input_lbl)
+        self.timer_input = QtWidgets.QSpinBox()
+        self.timer_input.setRange(1, 9999)
+        self.timer_input.setValue(60)
+        self.timer_input.setSingleStep(10)
+        self.timer_input.setFixedWidth(80)
+        self.timer_input.setStyleSheet(
+            "background-color: #1a1a1a; color: white; border: 1px solid white;"
+        )
+        timer_input_row.addWidget(self.timer_input)
+        button_layout.addLayout(timer_input_row)
+
+        # Countdown display
+        self.timer_display = QtWidgets.QLabel("00:00")
+        self.timer_display.setAlignment(QtCore.Qt.AlignCenter)
+        self.timer_display.setStyleSheet(
+            "color: #00ff88; font-size: 28px; font-weight: bold;"
+        )
+        button_layout.addWidget(self.timer_display)
+
+        # Timer control buttons
+        timer_btn_row = QtWidgets.QHBoxLayout()
+        self.timer_start_btn = QtWidgets.QPushButton("Start")
+        self.timer_start_btn.setFixedHeight(28)
+        self.timer_start_btn.clicked.connect(self.timer_start)
+        timer_btn_row.addWidget(self.timer_start_btn)
+        self.timer_stop_btn = QtWidgets.QPushButton("Stop")
+        self.timer_stop_btn.setFixedHeight(28)
+        self.timer_stop_btn.clicked.connect(self.timer_stop)
+        timer_btn_row.addWidget(self.timer_stop_btn)
+        self.timer_reset_btn = QtWidgets.QPushButton("Reset")
+        self.timer_reset_btn.setFixedHeight(28)
+        self.timer_reset_btn.clicked.connect(self.timer_reset)
+        timer_btn_row.addWidget(self.timer_reset_btn)
+        button_layout.addLayout(timer_btn_row)
+
+        # Internal timer state
+        self._timer_remaining = 0
+        self._timer_total     = 0
+        self._session_timer   = QtCore.QTimer(self)
+        self._session_timer.setInterval(1000)  # 1-second ticks
+        self._session_timer.timeout.connect(self._on_timer_tick)
+        self.timer_stop_btn.setEnabled(False)  # only active after Start
 
         self.toggle_camera_button = QtWidgets.QPushButton("Camera")
         self.toggle_camera_button.setCheckable(True)
@@ -520,13 +585,129 @@ class ArUco3DVisualizer(QtWidgets.QWidget):
             self.camera_widget.show()
             self.toggle_camera_button.setText("Hide Camera View")
 
+    # ── Board reset (unlimited times, signal-based completion) ───────────────
     def restart_process(self):
-        """Handle the button click to stop and restart threads."""
-        print("Restart button clicked!")   
-        self.bos_estimator.stop_all_threads()  
-        time.sleep(1)   
-        self.bos_estimator.reset_all_threads()  
-        print("Threads restarted!")  
+        """
+        Trigger a full board re-detection, safe to call unlimited times.
+        Completion detected via signal — no QThread.isRunning() polling
+        (which crashes after deleteLater fires on the C++ object).
+        """
+        print("Reset Board pressed — starting re-detection...")
+        self.restart_button.setEnabled(False)
+        self.restart_button.setText("Resetting...")
+        self.reset_status_label.setText("Detecting boards...")
+
+        # Keep a strong Python reference so GC doesn't collect it mid-run
+        self._reset_proc = ResetButtonProcess()
+
+        # Connect the worker's finished signal directly — fires on the GUI thread
+        # via Qt's queued connection, so it's safe to update widgets here.
+        self._reset_proc.reset_finished.connect(self._on_reset_finished)
+
+        self._reset_proc.start_worker_thread(self.bos_estimator.frame, self.bos_estimator)
+
+    def _on_reset_finished(self):
+        """Called via signal when the reset worker completes."""
+        self.restart_button.setEnabled(True)
+        self.restart_button.setText("Reset Board")
+        self.reset_status_label.setText("Board reset complete ✓")
+        QtCore.QTimer.singleShot(3000, lambda: self.reset_status_label.setText(""))
+        print("✅ Board reset complete — CoP streaming resumed")
+
+    # ── Session countdown timer — also controls recording ────────────────────
+    def timer_start(self):
+        """
+        Start the countdown and BEGIN data recording.
+        If already running (resume after Stop), just restarts countdown.
+        """
+        if self._session_timer.isActive():
+            return  # already running
+
+        # Fresh start: load duration from input field
+        if self._timer_remaining <= 0:
+            self._timer_total     = self.timer_input.value()
+            self._timer_remaining = self._timer_total
+
+        self._session_timer.start()
+        self._update_timer_display()
+        self.timer_display.setStyleSheet(
+            "color: #00ff88; font-size: 28px; font-weight: bold;"
+        )
+        self.timer_start_btn.setEnabled(False)
+        self.timer_stop_btn.setEnabled(True)
+
+        # ── Start data recording ──────────────────────────────────────────
+        try:
+            if (hasattr(self, 'data_logging_class')
+                    and not self.data_logging_class.is_recording):
+                self.data_logging_class.toggle_recording()
+                print("▶️  Recording STARTED by timer")
+        except Exception as e:
+            print(f"⚠️  Could not start recording: {e}")
+
+    def timer_stop(self):
+        """Stop the countdown and STOP data recording."""
+        self._session_timer.stop()
+        self.timer_display.setStyleSheet(
+            "color: #ffaa00; font-size: 28px; font-weight: bold;"
+        )
+        self.timer_start_btn.setEnabled(True)
+        self.timer_stop_btn.setEnabled(False)
+
+        # ── Stop data recording ───────────────────────────────────────────
+        try:
+            if (hasattr(self, 'data_logging_class')
+                    and self.data_logging_class.is_recording):
+                self.data_logging_class.toggle_recording()
+                print("⏹️  Recording STOPPED by timer")
+        except Exception as e:
+            print(f"⚠️  Could not stop recording: {e}")
+
+    def timer_reset(self):
+        """Stop countdown + recording and reset display to input value."""
+        # Stop recording if active
+        timer_stop_called = self._session_timer.isActive()
+        if timer_stop_called:
+            self.timer_stop()
+
+        self._timer_remaining = 0
+        self._update_timer_display()
+        self.timer_display.setStyleSheet(
+            "color: #00ff88; font-size: 28px; font-weight: bold;"
+        )
+        self.timer_start_btn.setEnabled(True)
+        self.timer_stop_btn.setEnabled(False)
+
+    def _on_timer_tick(self):
+        """Called every 1 second while timer is running."""
+        if self._timer_remaining > 0:
+            self._timer_remaining -= 1
+            self._update_timer_display()
+
+        if self._timer_remaining <= 0:
+            # Time's up — stop recording
+            self.timer_stop()
+            self.timer_display.setText("Done")
+            self.timer_display.setStyleSheet(
+                "color: #ff4444; font-size: 28px; font-weight: bold;"
+            )
+            # Flash 3× to alert operator
+            for i in range(3):
+                QtCore.QTimer.singleShot(
+                    i * 600,
+                    lambda on=(i % 2 == 0): self.timer_display.setStyleSheet(
+                        "color: #ff0000; font-size: 28px; font-weight: bold; background-color: #330000;"
+                        if on else
+                        "color: #ff4444; font-size: 28px; font-weight: bold;"
+                    )
+                )
+            print("⏰ Session timer finished — recording stopped")
+
+    def _update_timer_display(self):
+        """Render MM:SS on the countdown label."""
+        secs = max(self._timer_remaining, 0)
+        mm, ss = divmod(secs, 60)
+        self.timer_display.setText(f"{mm:02d}:{ss:02d}")
 
     def reset_camera_position(self):
         eye_x, eye_y, eye_z = self.initial_camera_position
