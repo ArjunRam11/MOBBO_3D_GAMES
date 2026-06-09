@@ -13,7 +13,7 @@ w=1280
 ARUCO_PARAMETERS = aruco.DetectorParameters()
 ARUCO_DICT = aruco.getPredefinedDictionary(aruco.DICT_ARUCO_ORIGINAL)
 detector = aruco.ArucoDetector(ARUCO_DICT, ARUCO_PARAMETERS)
-markerLength = 0.304
+markerLength = 0.294
 markerSeperation = 0.043
 board = aruco.GridBoard(
         size= [1,1],
@@ -54,7 +54,12 @@ def camera_functions(pipeline,mat,dist):
     counter = 0
     frames=[]
     point_corner = [(0.3, 0.225, 0), (-0.3, 0.225, 0), (-0.3, -0.225, 0), (0.3, -0.225, 0)]
-    pixelregion_corner = [(0.1, -0.125, 0), (-0.1,-0.125, 0), (-0.1, -0.225, 0), (0.1, -0.225, 0)]
+    pixelregion_corner        = [(0.1, -0.125, 0), (-0.1,-0.125, 0), (-0.1, -0.225, 0), (0.1, -0.225, 0)]
+    # Marker 68 is physically pasted 180° rotated — flip the LED region (negate X and Y)
+    pixelregion_corner_180    = [(-x, -y, z) for (x, y, z) in pixelregion_corner]
+    # 180° rotation around Z axis to correct pose axes for marker 68
+    R_180z = np.array([[-1, 0, 0], [0, -1, 0], [0, 0, 1]], dtype=np.float64)
+    ROTATED_MARKER_IDS = {108}
 
     board_setupdata={'board_corners':[],'ids':[], 'led_regions':[],'board_3dpos':[],'centre':[],'rotation_matrices':[]}
     frame_deadline = time.time() + 10.0
@@ -86,12 +91,26 @@ def camera_functions(pipeline,mat,dist):
 
                 for idx,id in enumerate(ids):
 
-                    if(id==11 or id==44 or id==68 or id==88):
+                    if(id==11 or id==44 or id==68 or id==88 or id ==55 or id == 33):
 
-                        rotation_vectors, translation_vectors, _objPoints = my_estimatePoseSingleMarkers(corners, marker_points, mat, dist)  
+                        rotation_vectors, translation_vectors, _objPoints = my_estimatePoseSingleMarkers(corners, marker_points, mat, dist)
                         rotation_vectors = np.array(rotation_vectors)
                         translation_vectors = np.array(translation_vectors)
-                        rmat =np.array(cv2.Rodrigues(rotation_vectors[idx])[0])
+                        rmat_raw = np.array(cv2.Rodrigues(rotation_vectors[idx])[0])
+
+                        # For markers pasted 180° rotated:
+                        #   rmat_raw already encodes the physical rotation — use it as-is for
+                        #   cv2.projectPoints so the board outline stays correct.
+                        #   BUT flip the LED region corners in local space (negate X, Y).
+                        #   For the stored rotation matrix (pose estimation), apply R_180z
+                        #   so the axes align with all other markers.
+                        marker_id = int(id.flat[0]) if hasattr(id, 'flat') else int(id)
+                        if marker_id in ROTATED_MARKER_IDS:
+                            rmat = rmat_raw @ R_180z   # corrected axes stored for pose
+                            led_corner_pts = pixelregion_corner_180  # flipped local coords
+                        else:
+                            rmat = rmat_raw
+                            led_corner_pts = pixelregion_corner
 
                         rot_vec = rmat.T @ (translation_vectors[idx][0]).reshape(3,1)
                         centre=np.mean(corners[idx],axis=1)
@@ -104,11 +123,12 @@ def camera_functions(pipeline,mat,dist):
                             board_setupdata['rotation_matrices'].append(rmat)
 
                         for rvec, tvec in zip(rotation_vectors, translation_vectors):
-                                
+
                                 image = aruco.drawDetectedMarkers(image, corners=corners, ids=ids)
                                 image = cv2.drawFrameAxes(image, mat, dist, rvec, tvec, 0.25)
-                        projected_point, _ = cv2.projectPoints(np.array(point_corner), rmat, translation_vectors[idx], mat,dist)  
-                        led_reg_point, _ = cv2.projectPoints(np.array(pixelregion_corner), rmat, translation_vectors[idx], mat,dist)  
+                        # Use rmat_raw for projection — it reflects the physical marker pose
+                        projected_point, _ = cv2.projectPoints(np.array(point_corner), rmat_raw, translation_vectors[idx], mat, dist)
+                        led_reg_point, _ = cv2.projectPoints(np.array(led_corner_pts), rmat_raw, translation_vectors[idx], mat, dist)  
                         image_coordinates = np.squeeze(np.round(projected_point)).astype(int) 
                         led_reg_coordinates=np.squeeze(np.round(led_reg_point)).astype(int) 
 
@@ -179,7 +199,7 @@ def process_image (image, mat, dist):
 
     if ids is not None:
         for idx, id in enumerate(ids):
-            if id == 11 or id == 44 or id == 68 or id == 88:
+            if id == 11 or id == 44 or id == 68 or id == 88 or id == 55 or id == 33:
                 # Estimate pose
                 rotation_vectors, translation_vectors, _objPoints = my_estimatePoseSingleMarkers(
                     corners, marker_points, mat, dist

@@ -1,6 +1,7 @@
 from PyQt5 import QtWidgets, QtCore
 import threading
 import time
+import traceback
 
 
 class LoadingWindow(QtWidgets.QWidget):
@@ -104,7 +105,7 @@ class BOSWorker(QtCore.QObject):
             self.finished.emit()
 
         except Exception as e:
-            self.error.emit(str(e))
+            self.error.emit(f"{e}\n\n{traceback.format_exc()}")
 
 
 class ResetButtonProcess(QtCore.QObject):

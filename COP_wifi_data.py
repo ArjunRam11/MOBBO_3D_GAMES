@@ -36,18 +36,28 @@ class MobboData:
         self.MESSAGE  = "Hey!mobbos"
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 4)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        self.sock.bind(('', self.UDP_PORT))
         self.sock.settimeout(2)
 
         self.missed_data_count = 0
         self.cop_data          = {}
+        self.cop_timestamps    = {}   # addr → time.time() of last received packet
         self.board_position    = None
+        self._known_board_ips  = []   # populated by set_board_ips() after discovery
         self.board_save        = False
         self.left_points       = None
         self.right_points      = None
 
         self._message_counters = {}
         self.data_types        = {"cop": True, "bos": True, "angles": True}
+
+        # ── Tare state (per board address) ────────────────────────────────────
+        self._tare_collecting  = False      # True while gathering tare samples
+        self._tare_samples     = {}         # addr → list of (copx, copy, w)
+        self._tare_values      = {}         # addr → (avg_copx, avg_copy, avg_w)
+        self._tare_n           = 50         # samples to average
 
         # ── Paths owned by SessionManager — set when recording starts ──────
         self._cop_trial_path   = None   # CoP_Data/trialN/   (CSVs go here directly)
@@ -174,6 +184,75 @@ class MobboData:
     # Board / foot data setters
     # ─────────────────────────────────────────────────────────────────────────
 
+    def set_board_ips(self, ip_list):
+        """Store discovered board IPs and immediately wake each one directly."""
+        self._known_board_ips = list(ip_list)
+        logger.info(f"📡 MobboData knows {len(self._known_board_ips)} board IPs: {self._known_board_ips}")
+        for ip in self._known_board_ips:
+            try:
+                self.sock.sendto(self.MESSAGE.encode(), (ip, self.UDP_PORT))
+            except OSError:
+                pass
+
+    def tare(self, n: int = 50):
+        """
+        Reset tare state and start collecting `n` samples per board.
+        The averaged (copx, copy, w) over those samples is subtracted from
+        every subsequent reading until tare() is called again.
+        """
+        self._tare_n          = n
+        self._tare_samples    = {}
+        self._tare_values     = {}
+        self._tare_collecting = True
+        logger.info(f"🔧 Tare started — collecting {n} samples per board")
+
+    def _apply_tare(self, addr, copx: float, copy: float, w: float):
+        """
+        Internal: collect tare samples or subtract tare from live values.
+        Returns (copx_tared, copy_tared, w_tared).
+
+        Each board is tared independently.  A board that finishes collecting
+        applies its offset immediately — it does not wait for other boards.
+        """
+        # Already tared: always apply offset, even if other boards still collecting
+        if addr in self._tare_values:
+            tc, ty, tw = self._tare_values[addr]
+            return copx - tc, copy - ty, max(0.0, w - tw)
+
+        # Still collecting for this board
+        if self._tare_collecting:
+            bucket = self._tare_samples.setdefault(addr, [])
+            bucket.append((copx, copy, w))
+            if len(bucket) >= self._tare_n:
+                avg_cx = sum(s[0] for s in bucket) / len(bucket)
+                avg_cy = sum(s[1] for s in bucket) / len(bucket)
+                avg_w  = sum(s[2] for s in bucket) / len(bucket)
+                self._tare_values[addr] = (avg_cx, avg_cy, avg_w)
+                del self._tare_samples[addr]
+                logger.info(
+                    f"✅ Tare done for {addr[0]}: "
+                    f"copx_offset={avg_cx:+.3f}  copy_offset={avg_cy:+.3f}  w_offset={avg_w:.3f}"
+                )
+                # Apply tare to this packet immediately
+                return copx - avg_cx, copy - avg_cy, max(0.0, w - avg_w)
+            # Still gathering samples — return raw
+            return copx, copy, w
+
+        return copx, copy, w
+
+    def _send_wake(self):
+        """Send wake message to boards — tries broadcast, then direct IPs as fallback."""
+        try:
+            self.sock.sendto(self.MESSAGE.encode(), (self.UDP_IP, self.UDP_PORT))
+        except OSError:
+            pass
+        # Also send directly to each known board (in case broadcast is blocked)
+        for ip in self._known_board_ips:
+            try:
+                self.sock.sendto(self.MESSAGE.encode(), (ip, self.UDP_PORT))
+            except OSError:
+                pass
+
     def set_board_data(self, board_position):
         self.board_position = board_position
 
@@ -187,7 +266,7 @@ class MobboData:
 
     def get_device_data(self):
         global stop_flag_wifi2, csv_writers, csv_files
-        self.sock.sendto(self.MESSAGE.encode(), (self.UDP_IP, self.UDP_PORT))
+        self._send_wake()
         global is_recording, board_save, foot_point_save
 
         try:
@@ -200,18 +279,28 @@ class MobboData:
                 try:
                     data, addr = self.sock.recvfrom(2048)
 
+                    # Verify XOR checksum: status3 (data[3]) == XOR of data[4:]
+                    if len(data) >= 5:
+                        computed = 0
+                        for b in data[4:]:
+                            computed ^= b
+                        if computed != data[3]:
+                            continue   # corrupted packet — discard silently
+
                     if len(data) == 34:
                         unpacked_data = struct.unpack('4c7fh', data)
                         f1, f2, f3, f4, copx, copy, w, w_sync = unpacked_data[4:]
                     elif len(data) == 32:
                         unpacked_data = struct.unpack('4c7f', data)
-                        t,f1, f2, f3, f4, copx, copy  = unpacked_data[4:]
+                        _,f1, f2, f3, f4, copx, copy  = unpacked_data[4:]
                         w = f1+f2+f3+f4
                         w_sync = 0
                     else:
                         continue
 
+                    copx, copy, w = self._apply_tare(addr, copx, copy, w)
                     self.cop_data[addr] = (copx, copy, w)
+                    self.cop_timestamps[addr] = time.time()
                     count = self._message_counters.get(addr, 0) + 1
                     self._message_counters[addr] = count
 
@@ -252,8 +341,12 @@ class MobboData:
                 except socket.timeout:
                     self.missed_data_count += 1
                     if self.missed_data_count > 1:
-                        self.sock.sendto(self.MESSAGE.encode(), (self.UDP_IP, self.UDP_PORT))
+                        self._send_wake()
                         self.missed_data_count = 0
+
+                except ConnectionResetError:
+                    # Windows ICMP "port unreachable" — harmless, retry
+                    continue
 
                 except KeyboardInterrupt:
                     break

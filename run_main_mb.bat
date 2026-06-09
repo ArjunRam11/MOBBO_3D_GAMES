@@ -15,7 +15,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-python main_4pt.py
+python "E:\Godot_interface\MOBBO_3D_GAMES_ADS\MOBBO_3D_GAMES\main_new.py"
 set "EXIT_CODE=%ERRORLEVEL%"
 
 endlocal & exit /b %EXIT_CODE%

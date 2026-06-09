@@ -150,8 +150,8 @@ class Frame_Process:
     def get_Frames(self, timeout=5):
         if not self.running:
             return None, None
-        color_copy = copy.deepcopy(self.color_frame)
-        depth_copy = copy.deepcopy(self.depth_frame)
+        color_copy = self.color_frame.copy() if self.color_frame is not None else None
+        depth_copy = self.depth_frame.copy() if self.depth_frame is not None else None
         return color_copy, depth_copy
 
     def set_exposure(self, value, auto_exposure=True):

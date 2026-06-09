@@ -48,15 +48,20 @@ class ImageCaptureManager:
         # pipeline.set_exposure(0, auto_exposure=True) 
         # time.sleep(0.5)
         self.polygon=camera_functions(pipeline,mat,dist)
-       
+
+        if not self.polygon['board_3dpos'] or len(self.polygon['board_3dpos'][0]) == 0:
+            raise ValueError("No ArUco boards detected by camera. Check board visibility and lighting.")
+        if not self.polygon['ids'] or len(self.polygon['ids'][0]) == 0:
+            raise ValueError("No ArUco IDs detected by camera. Check board visibility and lighting.")
+
         board_pos = self.polygon['board_3dpos'][0]
         board_rot = self.polygon['rotation_matrices']
         raw_ids = self.polygon['ids'][0]
 
         # Filter ids to only the known valid marker IDs (11, 44, 68, 88)
-        VALID_MARKER_IDS = {11, 44, 68, 88}
+        VALID_MARKER_IDS = {11, 44, 68, 88, 55, 33}
         board_ids = [int(i) for i in np.array(raw_ids).flatten() if int(i) in VALID_MARKER_IDS]
-        if len(board_ids)!=len(addresses)!=len(board_pos):
+        if not (len(board_ids) == len(addresses) == len(board_pos)):
             print("board id len=", len(board_ids), "board_pos len=",len(board_pos),"address len=", len(addresses))
             # if not addresses:
             raise ValueError("Some Board or IP not found! The devices are not reachable.")

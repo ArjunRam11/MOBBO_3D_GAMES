@@ -24,10 +24,8 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 from fileloader import *
-
 import numpy as np
 np.set_printoptions(precision=3, suppress=True)
-
 import math
 import cv2
 from PyQt5 import QtWidgets, QtCore
@@ -85,7 +83,7 @@ CONFIG = {
         'ERROR_RECOVERY': 0.1
     },
     'FOOT_PARAMS': {
-        'LENGTH': 0.27, 'WIDTH': 0.07, 'TOE_WIDTH': 0.1, 'HEIGHT': 0.020
+        'LENGTH': 0.26, 'WIDTH': 0.1, 'TOE_WIDTH': 0.1, 'HEIGHT': 0.020
     },
     'ROTATION_180': np.array([[-1, 0, 0], [0, -1, 0], [0, 0, 1]], dtype=np.float32),
     'BOARD_DIMS': {
@@ -153,7 +151,7 @@ class BoardData:
 def sanitize_fbp_data(keypoints_3d):
     if keypoints_3d is None:
         return None
-    if not isinstance(keypoints_3d, np.ndarray):
+    if not isinstance(keypoints_3d, np.ndarray): 
         return None
     if np.all(np.isnan(keypoints_3d)):
         return None
@@ -413,6 +411,8 @@ class BOSEstimator:
         self._pending_patient_id  = None
         self._current_patient_id  = None
         self._active_game_cop_path = None   # tracks active game recording path
+
+        self.bos_enabled = True  # BOS toggle: when False, skip foot/pose computation
 
         logger.info("BOSEstimator initialised (4-point foot model)")
 
@@ -770,16 +770,24 @@ class BOSEstimator:
         translations, rotation_matrices, ip_addresses, ids = [], [], [], []
 
         for i in range(len(board_pose_data)):
-            translations.append(board_pose_data[i][0]['board_translation'].reshape(3, 1))
-            rotation_matrices.append(board_pose_data[i][0]['rotation_matrix'].reshape(3, 3))
-            ip_addresses.append(board_pose_data[i][0]['ip_address'])
-            ids.extend(board_pose_data[i][0]['board_aruco_ids'].flatten().tolist())
+            entry = board_pose_data[i][0]
+            translations.append(entry['board_translation'].reshape(3, 1))
+            rotation_matrices.append(entry['rotation_matrix'].reshape(3, 3))
+            ip_addresses.append(entry['ip_address'].strip())
+            # Use the first ArUco marker ID as the representative board ID
+            # so ids[i] maps 1:1 with translations[i] and ip_addresses[i]
+            board_aruco = np.asarray(entry['board_aruco_ids']).flatten().tolist()
+            ids.append(int(board_aruco[0]))
+            print(f"  Board {i}: IP={entry['ip_address'].strip()} → ArUco ID={int(board_aruco[0])}")
 
         if len(translations) == 0:
             print("❌ No boards detected")
             return
 
         print(f"✅ Detected {len(translations)} boards with {len(ids)} IDs")
+
+        # Tell MobboData about discovered board IPs so it can send direct UDP
+        self.mobbo.set_board_ips(ip_addresses)
 
         distances = [t[2, 0] for t in translations]
         ref_index = np.argmin(distances)
@@ -872,6 +880,9 @@ class BOSEstimator:
         stop_flag_aruco = True
         stop_threads    = True
 
+        # Tare all boards once after detection — zeros out sensor offsets
+        self.mobbo.tare(n=50)
+
         if not self._initialized:
             self.thread_process_all(frame)
             self._initialized = True
@@ -942,42 +953,74 @@ class BOSEstimator:
 
             # ── 2. Process CoP data ────────────────────────────────────────
             if self.mobbo.cop_data:
-                addr_keys = list(self.mobbo.cop_data.keys())
-                if len(addr_keys) >= 2:
-                    total_weighted_cop = np.zeros((3, 1))
-                    total_weight       = 0.0
-                    self.all_cops      = []
+                _now = time.time()
+                addr_keys = [a for a in self.mobbo.cop_data
+                             if _now - self.mobbo.cop_timestamps.get(a, 0) < 0.2]
 
+                # ── DEBUG: print every ~2 s to diagnose board-11 issue ────────
+                self._dbg_counter = getattr(self, '_dbg_counter', 0) + 1
+                if self._dbg_counter >= 200:   # 200 × 10 ms = 2 s
+                    self._dbg_counter = 0
+                    print(f"\n[DEBUG] cop_data has {len(addr_keys)} board(s): {[a[0] for a in addr_keys]}")
+                    print(f"[DEBUG] board_ip map: {self.board_ip}")
+                    print(f"[DEBUG] reference IP : {self.reference_board_ip}  (id={self.reference_board_id})")
+                    print(f"[DEBUG] relative_rotations keys: {list(self.relative_rotations.keys())}")
                     for addr in addr_keys:
                         copx, copy, w = self.mobbo.cop_data[addr]
-                        cop_transformed = self.coord_transformer.local_cop_to_board_frame(copx, copy)
+                        bip = str(addr[0]).strip().lower()
+                        bid = next((k for k, v in self.board_ip.items()
+                                    if str(v).strip().lower() == bip), None)
+                        print(f"[DEBUG]   {addr[0]}  copx={copx:.2f} copy={copy:.2f} w={w:.3f}  "
+                              f"→ board_id_get={bid}  in_rel_rot={bid in self.relative_rotations if bid is not None else False}")
+                # ── END DEBUG ──────────────────────────────────────────────────
 
+                if len(addr_keys) >= 1:
+                    self.all_cops = []
+                    ref_ip = str(self.reference_board_ip).strip().lower()
+
+                    # ── Pass 1: reference board first (always index 0) ────────
+                    for addr in addr_keys:
+                        if str(addr[0]).strip().lower() == ref_ip:
+                            copx, copy, w = self.mobbo.cop_data[addr]
+                            cop_transformed = self.coord_transformer.local_cop_to_board_frame(copx, copy)
+                            self.all_cops.append((cop_transformed, w))
+                            break
+
+                    # ── Pass 2: non-reference boards in addr_keys order ───────
+                    for addr in addr_keys:
                         board_ip = str(addr[0]).strip().lower()
-                        ref_ip   = str(self.reference_board_ip).strip().lower()
-
                         if board_ip != ref_ip:
+                            copx, copy, w = self.mobbo.cop_data[addr]
+                            cop_transformed = self.coord_transformer.local_cop_to_board_frame(copx, copy)
                             board_id_get = next(
                                 (k for k, v in self.board_ip.items()
                                  if str(v).strip().lower() == board_ip), None
                             )
-                            if board_id_get and board_id_get in self.relative_rotations:
+                            if board_id_get is not None and board_id_get in self.relative_rotations:
                                 cop_transformed  = np.matmul(self.relative_rotations[board_id_get], cop_transformed)
                                 cop_transformed += self.relative_translations[board_id_get]
+                            self.all_cops.append((cop_transformed, w))
 
-                        self.all_cops.append((cop_transformed, w))
-                        total_weighted_cop += w * cop_transformed
-                        total_weight       += w
+                    # ── Filter: only boards with weight > 2 kg ────────────────
+                    active_cops = [(cv, cw) for cv, cw in self.all_cops if cw > 2]
 
-                    self.all_cops.sort(key=lambda x: x[1], reverse=True)
+                    # ── GCoP: weighted average of active boards only ──────────
+                    total_weight       = sum(cw for _, cw in active_cops)
+                    total_weighted_cop = np.zeros((3, 1))
+                    for cv, cw in active_cops:
+                        total_weighted_cop += cw * cv
                     Gcop = (total_weighted_cop / total_weight
-                            if total_weight != 0 else np.zeros((3, 1)))
+                            if total_weight > 0 else np.zeros((3, 1)))
+
+                    # Only active boards are displayed and streamed
+                    all_cops_display = active_cops
 
                     # Update Python 3D visualiser
                     if self.visualizer:
-                        self.visualizer.cop_and_gcop_update(self.all_cops, total_weight)
+                        self.visualizer.cop_and_gcop_update(all_cops_display, total_weight)
                     # Update 2-D split visualiser
                     if hasattr(self, 'visualizer_2d') and self.visualizer_2d:
-                        self.visualizer_2d.cop_and_gcop_update(self.all_cops, total_weight)
+                        self.visualizer_2d.cop_and_gcop_update(all_cops_display, total_weight)
 
                     # Update shared array for other modules
                     with data_lock:
@@ -990,14 +1033,14 @@ class BOSEstimator:
                         self._cop_print_counter = 0
                         gf = Gcop.flatten()
                         line = f"[CoP] GCoP x={gf[0]:+.1f}  y={gf[1]:+.1f}  W={total_weight:.2f}"
-                        for i, (cv, cw) in enumerate(self.all_cops):
+                        for i, (cv, cw) in enumerate(all_cops_display):
                             cf = cv.flatten()
                             line += f"   | Board{i+1}: x={cf[0]:+.1f} y={cf[1]:+.1f} w={cw:.2f}"
                         print(line)
 
                     # ── 3. Stream to Godot (port 8000) ─────────────────────
                     local_cops_data = []
-                    for cop_vec, cop_weight in self.all_cops:
+                    for cop_vec, cop_weight in all_cops_display:
                         f  = cop_vec.flatten()
                         lc = {
                             'x': sanitize_for_json(f[0]),
@@ -1043,16 +1086,35 @@ class BOSEstimator:
         def _valid(v):
             return v is not None and not np.isnan(np.asarray(v)).any()
 
+        # Set True to use ray-board-plane intersection (corrects parallax).
+        # Set False to revert to the original vertical Z-drop.
+        USE_RAY_PROJECTION = False
+
         def _project_to_board_plane(v):
-            """
-            Zero the Z component of a ref-board-frame keypoint so the foot
-            polygon is drawn on the board surface (Z=0) rather than at foot
-            height above the board.  The foot is ~2-5 cm above the board; at
-            the camera angle this creates a visible Y-shift without projection.
-            """
             arr = np.asarray(v, dtype=np.float64).flatten()
-            arr[2] = 0.0
-            return arr.reshape(1, 3)
+
+            if USE_RAY_PROJECTION:
+                # Cast a ray from the camera centre through the foot keypoint
+                # and find where it intersects the board plane (Z=0 in board frame).
+                # This corrects the inward parallax shift caused by foot height.
+                ref_rot = self.reference_board_rotation
+                ref_t   = np.asarray(self.reference_board_translation, dtype=np.float64).reshape(3)
+                R = (cv2.Rodrigues(ref_rot)[0]
+                     if np.asarray(ref_rot).shape != (3, 3)
+                     else np.asarray(ref_rot, dtype=np.float64))
+                cam_in_board = -(R.T @ ref_t)          # camera origin in board frame
+                ray = arr - cam_in_board
+                if abs(ray[2]) < 1e-9:                 # ray nearly parallel to board — fall back
+                    arr[2] = 0.0
+                    return arr.reshape(1, 3)
+                scale  = -cam_in_board[2] / ray[2]
+                ground = cam_in_board + scale * ray
+                ground[2] = 0.0                        # clamp floating-point residual
+                return ground.reshape(1, 3)
+            else:
+                # Original: vertical Z-drop
+                arr[2] = 0.0
+                return arr.reshape(1, 3)
 
         if foot_keys:
             # Right foot
@@ -1068,7 +1130,12 @@ class BOSEstimator:
                     if poly_xy is not None and not np.isnan(poly_xy).all():
                         z_col = np.zeros((poly_xy.shape[0], 1))
                         self.foot_numpy_points[0]     = np.hstack([poly_xy, z_col])
-                        self.foot_scatter_points[0]   = [right_heel_ref, right_big_ref]
+                        self.foot_scatter_points[0]   = [
+                            _project_to_board_plane(right_big_ref),    # 1st metatarsal
+                            _project_to_board_plane(right_mid_ref),    # 3rd metatarsal
+                            _project_to_board_plane(right_pinky_ref),  # 5th metatarsal
+                            _project_to_board_plane(right_heel_ref),   # navicular
+                        ]
                         self.right_foot_polygon_point = poly_xy
                 except Exception as e:
                     logger.warning(f"Right foot polygon failed: {e}")
@@ -1086,7 +1153,12 @@ class BOSEstimator:
                     if poly_xy is not None and not np.isnan(poly_xy).all():
                         z_col = np.zeros((poly_xy.shape[0], 1))
                         self.foot_numpy_points[1]    = np.hstack([poly_xy, z_col])
-                        self.foot_scatter_points[1]  = [left_heel_ref, left_big_ref]
+                        self.foot_scatter_points[1]  = [
+                            _project_to_board_plane(left_big_ref),     # 1st metatarsal
+                            _project_to_board_plane(left_mid_ref),     # 3rd metatarsal
+                            _project_to_board_plane(left_pinky_ref),   # 5th metatarsal
+                            _project_to_board_plane(left_heel_ref),    # navicular
+                        ]
                         self.left_foot_polygon_point = poly_xy
                 except Exception as e:
                     logger.warning(f"Left foot polygon failed: {e}")
@@ -1128,6 +1200,23 @@ class BOSEstimator:
 
             foot_keys, depth_frame1, image1 = self.foot_detection_model.get_keypoints()
 
+            # Draw 4 foot keypoints on camera frame
+            if foot_keys is not None and image1 is not None:
+                _foot_kp_colors = {
+                    'right_big_toe': (0, 0, 255),
+                    'right_mid':     (0, 128, 255),
+                    'right_pinky':   (0, 200, 255),
+                    'right_heel':    (0, 255, 200),
+                    'left_big_toe':  (255, 0, 0),
+                    'left_mid':      (255, 128, 0),
+                    'left_pinky':    (255, 200, 0),
+                    'left_heel':     (200, 255, 0),
+                }
+                for kp_name, color in _foot_kp_colors.items():
+                    if kp_name in foot_keys:
+                        px, py = int(foot_keys[kp_name][0]), int(foot_keys[kp_name][1])
+                        cv2.circle(image1, (px, py), 5, color, -1)
+
             # Periodic board config check
             board_check_counter += 1
             if board_check_counter >= BOARD_CHECK_INTERVAL:
@@ -1152,8 +1241,8 @@ class BOSEstimator:
                         self.godot_bridge.update_Boardpose_data(current_board_data)
                         self.previous_board_pose_hash = self._calculate_board_pose_hash(current_board_data)
 
-            # Foot keypoints → 3D → reference frame
-            if foot_keys is not None:
+            # Foot keypoints → 3D → reference frame (only when BOS enabled)
+            if self.bos_enabled and foot_keys is not None:
                 def get_3d(key):
                     if key in foot_keys:
                         return get_any_3d_points(
@@ -1205,57 +1294,68 @@ class BOSEstimator:
                             except Exception as e:
                                 logger.warning(f"Left BOS transform failed: {e}")
 
-            self.foot_shape_get_numpy_and_scatter_points(
-                foot_keys,
-                right_big_ref, right_mid_ref, right_pinky_ref, right_heel_ref,
-                left_big_ref,  left_mid_ref,  left_pinky_ref,  left_heel_ref
-            )
+            if self.bos_enabled:
+                self.foot_shape_get_numpy_and_scatter_points(
+                    foot_keys,
+                    right_big_ref, right_mid_ref, right_pinky_ref, right_heel_ref,
+                    left_big_ref,  left_mid_ref,  left_pinky_ref,  left_heel_ref
+                )
 
-            # MediaPipe body pose
+            # MediaPipe body pose (only when BOS enabled); camera frame always updated
             try:
-                results = pose.process(cv2.cvtColor(image1, cv2.COLOR_BGR2RGB))
+                _mp_skip = getattr(self, '_mp_skip_counter', 0) + 1
+                self._mp_skip_counter = _mp_skip
+                if self.bos_enabled and (_mp_skip % 2 == 0):  # run every other frame
+                    _t_mp0 = time.time()  # DIAG
+                    results = pose.process(cv2.cvtColor(image1, cv2.COLOR_BGR2RGB))
+                    _mp_ms  = (time.time() - _t_mp0) * 1000  # DIAG
+                    self._mp_diag_count = getattr(self, '_mp_diag_count', 0) + 1
+                    self._mp_diag_total = getattr(self, '_mp_diag_total', 0.0) + _mp_ms
+                    if self._mp_diag_count % 50 == 0:
+                        print(f"[DIAG mediapipe] avg={self._mp_diag_total/self._mp_diag_count:.1f}ms  last={_mp_ms:.1f}ms")
+                        self._mp_diag_count = 0; self._mp_diag_total = 0.0
 
-                if results.pose_landmarks:
-                    kp_dict   = get_keypoints_3d_sealibrary(
-                        results.pose_landmarks.landmark, depth_frame1, MAT
-                    )
-                    kp_matrix = np.array([
-                        kp_dict[k] if kp_dict[k] is not None else [None, None, None]
-                        for k in kp_dict
-                    ])
-                    corrected_kp = update_buffer(kp_matrix)
-                    kp_ref = return_BOS_vectors_singlekeypoint(
-                        ref_translation, ref_rotation_matrix,
-                        ref_translation, ref_rotation_matrix,
-                        corrected_kp
-                    )
-                    with data_lock:
-                        pose_3d_keypoints[:] = kp_ref
+                    if results.pose_landmarks:
+                        kp_dict   = get_keypoints_3d_sealibrary(
+                            results.pose_landmarks.landmark, depth_frame1, MAT
+                        )
+                        kp_matrix = np.array([
+                            kp_dict[k] if kp_dict[k] is not None else [None, None, None]
+                            for k in kp_dict
+                        ])
+                        corrected_kp = update_buffer(kp_matrix)
+                        kp_ref = return_BOS_vectors_singlekeypoint(
+                            ref_translation, ref_rotation_matrix,
+                            ref_translation, ref_rotation_matrix,
+                            corrected_kp
+                        )
+                        with data_lock:
+                            pose_3d_keypoints[:] = kp_ref
 
-                    ang = np.array(get_all_angles_from_18x3(kp_matrix)).reshape((8, 1))
-                    with data_lock:
-                        angles[:] = ang
+                        ang = np.array(get_all_angles_from_18x3(kp_matrix)).reshape((8, 1))
+                        with data_lock:
+                            angles[:] = ang
 
-                    fbp = sanitize_fbp_data(kp_ref)
-                    if fbp is not None and len(fbp) > 0:
-                        self.godot_bridge.update_FBP_points_batch(fbp)
+                        fbp = sanitize_fbp_data(kp_ref)
+                        if fbp is not None and len(fbp) > 0:
+                            self.godot_bridge.update_FBP_points_batch(fbp)
 
-                    desired_kp = [
-                        'head', 'neck', 'right_shoulder', 'left_shoulder',
-                        'right_elbow', 'left_elbow', 'right_hand', 'left_hand',
-                        'right_hip', 'left_hip', 'right_knee', 'left_knee',
-                        'right_foot', 'left_foot', 'left_heel', 'right_heel',
-                        'left_foot_index', 'right_foot_index'
-                    ]
-                    for key in desired_kp:
-                        lm = results.pose_landmarks.landmark[keypoints[key]]
-                        cx = int(lm.x * image1.shape[1])
-                        cy = int(lm.y * image1.shape[0])
-                        cv2.circle(image1, (cx, cy), 2, (0, 255, 0), cv2.FILLED)
+                        desired_kp = [
+                            'head', 'neck', 'right_shoulder', 'left_shoulder',
+                            'right_elbow', 'left_elbow', 'right_hand', 'left_hand',
+                            'right_hip', 'left_hip', 'right_knee', 'left_knee',
+                            'right_foot', 'left_foot', 'left_heel', 'right_heel',
+                            'left_foot_index', 'right_foot_index'
+                        ]
+                        for key in desired_kp:
+                            lm = results.pose_landmarks.landmark[keypoints[key]]
+                            cx = int(lm.x * image1.shape[1])
+                            cy = int(lm.y * image1.shape[0])
+                            cv2.circle(image1, (cx, cy), 2, (0, 255, 0), cv2.FILLED)
 
-                else:
-                    with data_lock:
-                        pose_3d_keypoints[:] = np.full((18, 3), np.nan)
+                    else:
+                        with data_lock:
+                            pose_3d_keypoints[:] = np.full((18, 3), np.nan)
 
                 if image1 is not None and self.visualizer:
                     self.visualizer.camera_update(image1)
@@ -1321,7 +1421,8 @@ def main():
         def on_worker_finished():
             loading_window.close()
             visualizer.show()
-            bos_estimator.visualizer_2d.show()
+            if hasattr(bos_estimator, 'visualizer_2d') and bos_estimator.visualizer_2d is not None:
+                bos_estimator.visualizer_2d.show()
             logger.info("Application initialisation completed")
 
         def on_worker_error(error_msg):

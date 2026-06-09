@@ -265,6 +265,17 @@ class ArUco3DVisualizer(QtWidgets.QWidget):
         self.reset_status_label.setFixedSize(150, 20)
         button_layout.addWidget(self.reset_status_label)
 
+        # ── BOS toggle ────────────────────────────────────────────────────
+        self.bos_toggle_btn = QtWidgets.QPushButton("BOS: ON")
+        self.bos_toggle_btn.setCheckable(True)
+        self.bos_toggle_btn.setChecked(True)
+        self.bos_toggle_btn.setStyleSheet(
+            "QPushButton:checked { background-color: #4caf50; color: white; }"
+            "QPushButton:!checked { background-color: #888888; color: white; }"
+        )
+        self.bos_toggle_btn.clicked.connect(self.toggle_bos)
+        button_layout.addWidget(self.bos_toggle_btn)
+
         # ── Session countdown timer ───────────────────────────────────────
         timer_sep = QtWidgets.QFrame()
         timer_sep.setFrameShape(QtWidgets.QFrame.HLine)
@@ -385,8 +396,8 @@ class ArUco3DVisualizer(QtWidgets.QWidget):
         self.keypoints_3d = gl.GLScatterPlotItem()
         self.view.addItem(self.keypoints_3d)
 
-        self.left_foot_mesh = gl.GLMeshItem()
-        self.right_foot_mesh = gl.GLMeshItem()
+        self.left_foot_mesh = gl.GLMeshItem(glOptions='translucent')
+        self.right_foot_mesh = gl.GLMeshItem(glOptions='translucent')
         self.view.addItem(self.left_foot_mesh)
         self.view.addItem(self.right_foot_mesh)
 
@@ -404,7 +415,7 @@ class ArUco3DVisualizer(QtWidgets.QWidget):
         self.timer.timeout.connect(self.foot_graph_update)
          
         self.timer.timeout.connect(self.update_color_legend)
-        self.timer.start(50)
+        self.timer.start(33)
 
        
 
@@ -575,8 +586,14 @@ class ArUco3DVisualizer(QtWidgets.QWidget):
             text_item.text = text_item.text  
             text_item.font = QtGui.QFont('Helvetica', new_font_size)   
 
+    # BOS toggle
+    def toggle_bos(self):
+        enabled = self.bos_toggle_btn.isChecked()
+        self.bos_estimator.bos_enabled = enabled
+        self.bos_toggle_btn.setText("BOS: ON" if enabled else "BOS: OFF")
+
     # camera switch process
-    
+
     def toggle_camera(self):
         if self.camera_widget.isVisible():
             self.camera_widget.hide()
@@ -729,46 +746,57 @@ class ArUco3DVisualizer(QtWidgets.QWidget):
         super().resizeEvent(event)
 
     def update_plot(self):
+        _t0 = time.time()  # DIAG
+        try:
+            self._update_plot_impl()
+        except Exception:
+            pass  # Never let a graph update crash kill the Qt event loop
+        # DIAG: track update_plot time
+        self._diag_up_total = getattr(self, '_diag_up_total', 0.0) + (time.time() - _t0) * 1000
+        self._diag_up_count = getattr(self, '_diag_up_count', 0) + 1
+        if self._diag_up_count >= 40:
+            print(f"[DIAG GUI] update_plot avg={self._diag_up_total/self._diag_up_count:.1f}ms")
+            self._diag_up_total = 0.0; self._diag_up_count = 0
+
+    def _update_plot_impl(self):
         global process_complete
 
-        # if process_complete:
-        
+        # Copy shared data quickly under the lock, then render outside it so
+        # compute_COP is not blocked during expensive GL operations.
         with data_lock:
+            kp_copy   = pose_3d_keypoints.copy()
+            ang_copy  = angles.copy() if angles is not None else None
+            gcop_copy = gcop1.copy()  if gcop1   is not None else None
 
-                 
-                if self.keypoints_checkbox.isChecked() and np.any(pose_3d_keypoints) and  not np.isnan(pose_3d_keypoints).all():
-                    self.update_pose_keypoints(pose_3d_keypoints)
-                    if self.keypoint_angle_checkbox.isChecked() and np.any(angles) and angles is not None:
-                        self.update_angle_labels(angles,pose_3d_keypoints)
-                    else:
-                        for label in self.angle_labels:
-                            self.view.removeItem(label)
-                        self.angle_labels.clear()
-                    if self.keypoint_names_checkbox.isChecked():
-                        self.update_keypoint_labels(pose_3d_keypoints)
-                    else:
-                        self.clear_text_labels()
-                else:
-                    self.keypoints_3d.setData(pos=np.array([[0, 0, 0]]))
-                    for line_item in self.pose_lines:
-                        self.view.removeItem(line_item)
-                    self.pose_lines.clear()
-                    self.clear_text_labels()
-                if self.keypoint_data_checkbox.isChecked():
-                    self.keypoint_data_window.update_keypoint_data(pose_3d_keypoints, list(self.keypoints.keys()))
-                    self.keypoint_data_window.show()
-                else:
-                    self.keypoint_data_window.hide()
+        if self.keypoints_checkbox.isChecked() and np.any(kp_copy) and not np.isnan(kp_copy).all():
+            self.update_pose_keypoints(kp_copy)
+            if self.keypoint_angle_checkbox.isChecked() and ang_copy is not None and np.any(ang_copy):
+                self.update_angle_labels(ang_copy, kp_copy)
+            else:
+                for label in self.angle_labels:
+                    self.view.removeItem(label)
+                self.angle_labels.clear()
+            if self.keypoint_names_checkbox.isChecked():
+                self.update_keypoint_labels(kp_copy)
+            else:
+                self.clear_text_labels()
+        else:
+            self.keypoints_3d.setData(pos=np.array([[0, 0, 0]]))
+            for line_item in self.pose_lines:
+                self.view.removeItem(line_item)
+            self.pose_lines.clear()
+            self.clear_text_labels()
 
-                if gcop1 is not None:
+        if self.keypoint_data_checkbox.isChecked():
+            self.keypoint_data_window.update_keypoint_data(kp_copy, list(self.keypoints.keys()))
+            self.keypoint_data_window.show()
+        else:
+            self.keypoint_data_window.hide()
 
-                    
-                    self.cop.gcop_update ( self.gcop1_mesh, gcop1,self.weight )
-
-
+        if gcop_copy is not None:
+            self.cop.gcop_update(self.gcop1_mesh, gcop_copy, self.weight)
 
         if self.cop_and_weight is not None:
-
             self.cop.update_all_cops(self.cop_and_weight)
              
           
@@ -780,10 +808,9 @@ class ArUco3DVisualizer(QtWidgets.QWidget):
         self.weight=weight
     
     def camera_update(self, latest_frame):
-        
-
-        if  latest_frame is not None:   
-            self.display_camera_feed(  latest_frame)
+        pass  # Frame display disabled for performance
+        # if  latest_frame is not None:
+        #     self.display_camera_feed(  latest_frame)
 
 
     def display_camera_feed(self, image):
@@ -847,11 +874,19 @@ class ArUco3DVisualizer(QtWidgets.QWidget):
 
 
     def foot_graph_update(self):
+        _t0 = time.time()  # DIAG
+        try:
+            self._foot_graph_update_impl()
+        except Exception as e:
+            pass  # Never let a graph update crash kill the Qt event loop
+        # DIAG: track foot_graph_update time
+        self._diag_fg_total = getattr(self, '_diag_fg_total', 0.0) + (time.time() - _t0) * 1000
+        self._diag_fg_count = getattr(self, '_diag_fg_count', 0) + 1
+        if self._diag_fg_count >= 40:
+            print(f"[DIAG GUI] foot_graph_update avg={self._diag_fg_total/self._diag_fg_count:.1f}ms")
+            self._diag_fg_total = 0.0; self._diag_fg_count = 0
 
-
-        # self.foot_graph_updater=FootGraphUpdater(self.bos_estimator,self.view,self.right_foot_mesh,self.left_foot_mesh,self.right_scatter,self.left_scatter,self.area_label)
-
-
+    def _foot_graph_update_impl(self):
         self.right_foot_mesh.setMeshData(vertices=np.array([[0, 0, 0]]), faces=np.array([[0, 0, 0]]))  # Clear right foot mesh
         self.left_foot_mesh.setMeshData(vertices=np.array([[0, 0, 0]]), faces=np.array([[0, 0, 0]]))  # Clear left foot mesh
         self.right_scatter.setData(pos=np.empty((0, 3)))  # Explicitly clear scatter with empty 3D points
@@ -893,12 +928,12 @@ class ArUco3DVisualizer(QtWidgets.QWidget):
                             if detect_id == 0:  # Right foot
                                 # print("right foot")
                                 self.update_mesh_foot_plot(self.right_foot_mesh, foot)
-                                self.update_scatter(self.right_scatter, [scatter[0], scatter[1]])
+                                self.update_scatter(self.right_scatter, scatter)
                                 self.hull_shape_find_and_draw( foot)
                             elif detect_id == 1:  # Left foot
                                 # print("left foot")
                                 self.update_mesh_foot_plot(self.left_foot_mesh, foot)
-                                self.update_scatter(self.left_scatter, [scatter[0], scatter[1]])
+                                self.update_scatter(self.left_scatter, scatter)
                                 self.hull_shape_find_and_draw(foot)
                             return
                     
@@ -908,21 +943,17 @@ class ArUco3DVisualizer(QtWidgets.QWidget):
                 self.clear_mesh(self.right_foot_mesh)
 
             if foot_scatter_points[0] is not None:
-                self.update_scatter(
-                    self.right_scatter, [foot_scatter_points[0][0], foot_scatter_points[0][1]]
-                )
+                self.update_scatter(self.right_scatter, foot_scatter_points[0])
             else:
                 self.right_scatter.setData(pos=np.empty((0, 3)))  # Explicitly clear scatter with empty 3D points
 
             if foot_numpy_points[1] is not None:
                 self.update_mesh_foot_plot(self.left_foot_mesh, foot_numpy_points[1])
-            else:  
+            else:
                 self.clear_mesh(self.left_foot_mesh)
 
             if foot_scatter_points[1] is not None:
-                self.update_scatter(
-                    self.left_scatter, [foot_scatter_points[1][0], foot_scatter_points[1][1]]
-                )
+                self.update_scatter(self.left_scatter, foot_scatter_points[1])
             else:
                 self.left_scatter.setData(pos=np.empty((0, 3)))  # Same for left scatter
 
@@ -957,18 +988,21 @@ class ArUco3DVisualizer(QtWidgets.QWidget):
         scatter_item.setData(pos=pts, size=10, color=(1, 0, 0, 1))
 
     def update_mesh_foot_plot(self,mesh_item,foot_points):
-
-
-        if foot_points is None:
-            print("foot_points is None")  # Debug: None check
-            mesh_item.setMeshData(vertexes=np.array([]), faces=np.array([]))
+        if foot_points is None or len(foot_points) < 3:
+            self.clear_mesh(mesh_item)
             return
-        delaunay = Delaunay(foot_points[:, :2])
-        faces = delaunay.simplices
-        colors = np.array([[0.878, 0.675, 0.412, 1]] * len(faces))
-        meshdata = gl.MeshData(vertexes=foot_points, faces=faces, faceColors=colors)
-        mesh_item.setMeshData(meshdata=meshdata, smooth=False, computeNormals=False)
-        mesh_item.setVisible(True)
+        try:
+            delaunay = Delaunay(foot_points[:, :2])
+            faces = delaunay.simplices
+            if len(faces) == 0:
+                self.clear_mesh(mesh_item)
+                return
+            colors = np.array([[0.878, 0.675, 0.412, 0.45]] * len(faces))
+            meshdata = gl.MeshData(vertexes=foot_points, faces=faces, faceColors=colors)
+            mesh_item.setMeshData(meshdata=meshdata, smooth=False, computeNormals=False)
+            mesh_item.setVisible(True)
+        except Exception:
+            self.clear_mesh(mesh_item)
 
     def area_polygon(self, combined_points):
         points = np.asarray(combined_points, dtype=float)

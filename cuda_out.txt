@@ -1,0 +1,4 @@
+﻿CUDA: True
+GPU: NVIDIA GeForce RTX 3050 Laptop GPU
+YOLO on GPU (device=0): avg=19.2ms  min=17.4ms  max=21.7ms
+YOLO on CPU:            avg=20.0ms  min=18.9ms

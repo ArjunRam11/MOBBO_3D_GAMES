@@ -12,9 +12,7 @@ from local_ip_fetch import*
 
 MESSAGE = "Hey Mobbos!"
 local_ip=Ip()
-
 UDP_IP =  local_ip.Local_ip() [0]
- 
 UDP_PORT = 23000        
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -134,51 +132,79 @@ def Send_led_commands(addresses, image):
     sock.close()
 
 
-    
-
-
 def get_available_ids():
-     
-     
-     
-    UDP_PORT = 23000           
+
+    UDP_PORT = 23000
     MESSAGE = "Hey!mobbos"
+    unique_addresses = set()
+    start_time = time.time()
 
-
+    # --- Phase 1: Try broadcast (fast, but may be blocked by firewall/router) ---
+    print(f"Phase 1: Broadcast discovery on {UDP_IP}:{UDP_PORT}")
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-
-     
-    sock.settimeout(5)
-
-
-    unique_addresses = set()
-
-
-    start_time = time.time()
-    while time.time() - start_time < 3:
-
-        sock.sendto(MESSAGE.encode(), (UDP_IP, UDP_PORT))
-        
+    sock.settimeout(2)
+    broadcast_deadline = time.time() + 6
+    while time.time() < broadcast_deadline:
         try:
-
+            sock.sendto(MESSAGE.encode(), (UDP_IP, UDP_PORT))
+        except OSError:
+            pass
+        try:
             data, addr = sock.recvfrom(1024)
-            
-
             if addr not in unique_addresses:
                 unique_addresses.add(addr)
+                print(f"  Found board (broadcast): {addr[0]}")
         except socket.timeout:
-            break  # Break the loop if a timeout occurs
+            continue
+        except ConnectionResetError:
+            continue
+    sock.close()
 
+    # --- Phase 2: Direct scan if broadcast found nothing ---
+    if not unique_addresses:
+        # Broadcast was blocked — scan the subnet with direct UDP
+        subnet_prefix = UDP_IP.rsplit('.', 1)[0]  # e.g. "192.168.0"
+        print(f"Phase 2: Broadcast blocked — scanning {subnet_prefix}.1-254 directly")
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(0.15)
+
+        # Send to all IPs first (fast burst), then collect responses
+        for host in range(1, 255):
+            ip = f"{subnet_prefix}.{host}"
+            try:
+                sock.sendto(MESSAGE.encode(), (ip, UDP_PORT))
+            except OSError:
+                pass
+        # Short pause for responses to arrive
+        time.sleep(0.3)
+
+        # Collect all pending responses
+        collect_deadline = time.time() + 3
+        while time.time() < collect_deadline:
+            try:
+                data, addr = sock.recvfrom(1024)
+                if addr not in unique_addresses:
+                    unique_addresses.add(addr)
+                    print(f"  Found board (direct): {addr[0]}")
+            except socket.timeout:
+                # Send another round to catch slow boards
+                for host in range(1, 255):
+                    try:
+                        sock.sendto(MESSAGE.encode(), (f"{subnet_prefix}.{host}", UDP_PORT))
+                    except OSError:
+                        pass
+            except ConnectionResetError:
+                # Windows ICMP "port unreachable" — harmless, just retry
+                continue
+        sock.close()
 
     list_of_addresses = [addr[0] for addr in unique_addresses]
-
-    
-    sock.close()
+    elapsed = time.time() - start_time
+    print(f"Discovery complete: found {len(list_of_addresses)} boards in {elapsed:.1f}s — {list_of_addresses}")
     if not list_of_addresses:
         print("No addresses found!")
-         
-        return None   
+        return None
 
     return list_of_addresses
 

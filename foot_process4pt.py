@@ -36,11 +36,16 @@ SIDE_COLORS = {
 class foot_detector():
 
     def __init__(self):
-        self.target_ids = [11, 68]
+        self.target_ids = [11, 68, 55,88,33,44]
 
         # ── Update this path to your 4-point model ───────────────────────
         self.foot_predict = YOLO(fr'E:\OpenCV_mobbo_works\BaseOfSupport\notebooks\runs\pose\train3\weights\best.pt')
-        
+
+        # Warmup: run a dummy inference so CUDA kernels are compiled before
+        # the first real frame arrives — prevents the 200ms+ cold-start spike
+        _dummy = np.zeros((240, 320, 3), dtype=np.uint8)
+        self.foot_predict.predict([_dummy, _dummy], conf=0.5, verbose=False, device=0)
+        print("✅ YOLO GPU warmup complete")
         # ─────────────────────────────────────────────────────────────────
 
         self.keypoints = None
@@ -96,12 +101,6 @@ class foot_detector():
             cv2.circle(color_image, pt, radius=8,
                        color=SIDE_COLORS[side], thickness=2)   # outline
 
-            label = f"{side[0].upper()}.{part}"
-            cv2.putText(color_image, label,
-                        (pt[0] + 5, pt[1] - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45,
-                        color, 1, cv2.LINE_AA)
-
         # ── Skeleton lines per foot ───────────────────────────────────────
         for side in ("right", "left"):
             heel    = keypoints_dict.get(f"{side}_heel")
@@ -138,8 +137,24 @@ class foot_detector():
 
         frame_count  = 0
         stored_rvecs = {}
-        stored_tvecs = {}
-        detected_ids = set(target_ids)
+
+        # ── DIAG state ────────────────────────────────────────────────────────
+        _diag_loop_count  = 0
+        _diag_total_loop  = 0.0
+        _diag_total_yolo  = 0.0
+        _diag_total_aruco = 0.0
+        _diag_yolo_calls  = 0
+        _diag_t_loop_start = time.time()
+        # ── END DIAG state ────────────────────────────────────────────────────
+
+        # ── FPS display state ─────────────────────────────────────────────────
+        _fps_prev_time = time.time()
+        _fps_display   = 0.0
+        # ─────────────────────────────────────────────────────────────────────
+
+        stored_tvecs    = {}
+        detected_ids    = set(target_ids)
+        _last_keypoints = None   # cached keypoints for YOLO skip frames
 
         # Detection status for HUD
         status_msg   = "Initialising..."
@@ -149,6 +164,7 @@ class foot_detector():
             if not foot_thread_flag:
                 break
 
+            _diag_t0 = time.time()  # DIAG: loop start
             color_frame, depth_frame = frame2.get_Frames()
 
             if (color_frame is None or depth_frame is None
@@ -163,7 +179,12 @@ class foot_detector():
             # always carries the fully-annotated frame.
 
             # ── ArUco detection & pose estimation ─────────────────────────
-            corners, ids, _ = cv2.aruco.detectMarkers(color_image, ARUCO_DICT)
+            _diag_ta0 = time.time()  # DIAG
+            half_frame = cv2.resize(color_image, (640, 360))
+            corners_half, ids, _ = cv2.aruco.detectMarkers(half_frame, ARUCO_DICT)
+            # Scale corners back to full-res so projectPoints stays accurate
+            corners = [c * 2.0 for c in corners_half] if corners_half else corners_half
+            _diag_total_aruco += time.time() - _diag_ta0  # DIAG
             frame_count += 1
 
             # Draw all detected ArUco markers for reference
@@ -186,8 +207,8 @@ class foot_detector():
             elif frame_count > 10 and detected_ids:
                 status_msg = "Running detection"
 
-                # Update ArUco poses from current frame
-                if ids is not None:
+                # ── Throttle solvePnP: update poses every 3rd frame only ───
+                if ids is not None and (frame_count % 3 == 0):
                     valid_indices = [
                         i for i, mid in enumerate(ids.flatten())
                         if mid in detected_ids
@@ -201,8 +222,8 @@ class foot_detector():
                             stored_rvecs[mid] = rvecs[i]
                             stored_tvecs[mid] = tvecs[i]
 
-                # ── YOLO inference per tracked marker ──────────────────────
-                combined_keypoints = {}
+                # ── Build crop list for batched YOLO ───────────────────────
+                crops, crop_meta = [], []
                 det_count = {"right": 0, "left": 0}
 
                 for marker_id in stored_rvecs:
@@ -212,7 +233,6 @@ class foot_detector():
                     rvec = stored_rvecs[marker_id]
                     tvec = stored_tvecs[marker_id]
 
-                    # Project board crop region onto image
                     projected, _ = cv2.projectPoints(
                         corners_board, rvec, tvec, mat, dist
                     )
@@ -226,109 +246,76 @@ class foot_detector():
                     if x_max <= x_min or y_max <= y_min:
                         continue
 
-                    # Draw crop box so we can see what YOLO is looking at
-                    # cv2.rectangle(color_image,
-                    #               (x_min, y_min), (x_max, y_max),
-                    #               (200, 200, 0), 2)
-                    # cv2.putText(color_image, f"ID:{marker_id}",
-                    #             (x_min + 4, y_min + 18),
-                    #             cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                    #             (200, 200, 0), 2, cv2.LINE_AA)
-
                     cropped = color_image[y_min:y_max, x_min:x_max]
-                    resized = cv2.resize(cropped, (640, 480))
+                    resized = cv2.resize(cropped, (320, 240))   # smaller = faster
+                    crops.append(resized)
+                    crop_meta.append((marker_id, x_min, x_max, y_min, y_max))
 
-                    results = self.foot_predict.predict(
-                        resized, conf=0.5, verbose=False
-                    )[0]
+                # ── Single batched YOLO call every other frame ─────────────
+                if crops and (frame_count % 2 == 0):
+                    combined_keypoints = {}
+                    _diag_ty0 = time.time()
+                    all_results = self.foot_predict.predict(
+                        crops, conf=0.5, verbose=False, device=0
+                    )
+                    _diag_total_yolo += time.time() - _diag_ty0
+                    _diag_yolo_calls += 1
 
-                    if results.keypoints is None:
-                        status_msg = f"ID:{marker_id} – no keypoints"
-                        continue
+                    for results, (marker_id, x_min, x_max, y_min, y_max) in zip(all_results, crop_meta):
+                        if results.keypoints is None:
+                            status_msg = f"ID:{marker_id} – no keypoints"
+                            continue
 
-                    x_norm = results.keypoints.xyn.cpu().numpy()
-                    _cls   = results.boxes.cls.cpu().numpy()
+                        x_norm = results.keypoints.xyn.cpu().numpy()
+                        _cls   = results.boxes.cls.cpu().numpy()
 
-                    # ── Two feet ───────────────────────────────────────────
-                    if x_norm.shape == (2, 4, 2):
-                        sides = (["right", "left"] if _cls[0] == 0
-                                 else ["left", "right"])
-                        for i, side in enumerate(sides):
+                        if x_norm.shape == (2, 4, 2):
+                            sides = (["right", "left"] if _cls[0] == 0
+                                     else ["left", "right"])
+                            for i, side in enumerate(sides):
+                                det_count[side] += 1
+                                for j, part in enumerate(FOOT_PARTS):
+                                    px, py = self._normalize_to_pixel(
+                                        x_norm[i][j], x_min, x_max, y_min, y_max
+                                    )
+                                    combined_keypoints[f"{side}_{part}"] = (px, py)
+                            status_msg = "BOTH feet detected ✓"
+
+                        elif x_norm.shape == (1, 4, 2):
+                            side = "right" if _cls[0] == 0 else "left"
                             det_count[side] += 1
                             for j, part in enumerate(FOOT_PARTS):
                                 px, py = self._normalize_to_pixel(
-                                    x_norm[i][j], x_min, x_max, y_min, y_max
+                                    x_norm[0][j], x_min, x_max, y_min, y_max
                                 )
                                 combined_keypoints[f"{side}_{part}"] = (px, py)
-                        status_msg = "BOTH feet detected ✓"
+                            status_msg = f"{side.upper()} foot detected ✓"
 
-                    # ── One foot ───────────────────────────────────────────
-                    elif x_norm.shape == (1, 4, 2):
-                        side = "right" if _cls[0] == 0 else "left"
-                        det_count[side] += 1
-                        for j, part in enumerate(FOOT_PARTS):
-                            px, py = self._normalize_to_pixel(
-                                x_norm[0][j], x_min, x_max, y_min, y_max
-                            )
-                            combined_keypoints[f"{side}_{part}"] = (px, py)
-                        status_msg = f"{side.upper()} foot detected ✓"
-
-                    else:
-                        status_msg = (f"ID:{marker_id} – unexpected shape "
-                                      f"{x_norm.shape}")
-
-                    # ── Show zoomed crop with raw YOLO output ──────────────
-                    crop_debug = resized.copy()
-                    if results.keypoints is not None:
-                        # Build a safe side label list for however many detections exist
-                        n_det = x_norm.shape[0]
-                        if n_det == 2:
-                            debug_sides = ["right", "left"]
-                        elif len(_cls) > 0:
-                            debug_sides = ["right" if _cls[0] == 0 else "left"]
                         else:
-                            debug_sides = ["unknown"] * n_det
+                            status_msg = (f"ID:{marker_id} – unexpected shape "
+                                          f"{x_norm.shape}")
 
-                        for di in range(n_det):
-                            d_side = debug_sides[di] if di < len(debug_sides) else "unknown"
-                            det_points = x_norm[di]
-                            if det_points.ndim != 2 or det_points.shape[1] != 2:
-                                continue
-
-                            part_count = min(len(FOOT_PARTS), det_points.shape[0])
-                            if part_count == 0:
-                                cv2.putText(crop_debug, f"{d_side}: no keypoints",
-                                            (10, 20 + 18 * di),
-                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                                            (255, 255, 255), 1, cv2.LINE_AA)
-                                continue
-
-                    #         for dj in range(part_count):
-                    #             part = FOOT_PARTS[dj]
-                    #             nx, ny = det_points[dj]
-                    #             if not np.isfinite(nx) or not np.isfinite(ny):
-                    #                 continue
-                    #             cpx = int(nx * 640)
-                    #             cpy = int(ny * 480)
-                    #             pcolor = PART_COLORS.get(part, (255, 255, 255))
-                    #             cv2.circle(crop_debug, (cpx, cpy), 5, pcolor, -1)
-                    #             cv2.putText(crop_debug, part[:3],
-                    #                         (cpx + 4, cpy - 4),
-                    #                         cv2.FONT_HERSHEY_SIMPLEX, 0.4,
-                    #                         pcolor, 1)
-                    # cv2.imshow(f"Foot crop – ArUco {marker_id}", crop_debug)
-
-                # Store merged keypoints
-                self.keypoints = combined_keypoints if combined_keypoints else None
+                    _last_keypoints  = combined_keypoints if combined_keypoints else None
+                    self.keypoints   = _last_keypoints
+                else:
+                    # Skipped YOLO frame — reuse last result
+                    self.keypoints = _last_keypoints
 
                 # Draw all keypoints + skeleton on the full-res frame
                 self._draw_keypoints_on_frame(color_image, self.keypoints)
+
+            # ── Per-frame FPS ─────────────────────────────────────────────
+            _now = time.time()
+            _dt  = _now - _fps_prev_time
+            _fps_prev_time = _now
+            _fps_display = 1.0 / _dt if _dt > 0 else _fps_display
 
             # ── HUD overlay ───────────────────────────────────────────────
             # Status bar at top
             cv2.rectangle(color_image, (0, 0), (color_image.shape[1], 30),
                           (30, 30, 30), -1)
-            cv2.putText(color_image, f"Frame {frame_count} | {status_msg}",
+            cv2.putText(color_image,
+                        f"Frame {frame_count} | {status_msg} | FPS: {_fps_display:.1f}",
                         (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                         (255, 255, 255), 1, cv2.LINE_AA)
 
@@ -344,8 +331,29 @@ class foot_detector():
             # This is the fix: self.image now always carries the annotated frame
             self.image = color_image
 
+            # ── DIAG: per-loop timing + periodic report ───────────────────
+            _diag_loop_count += 1
+            _diag_total_loop += time.time() - _diag_t0
+            if _diag_loop_count % 50 == 0:
+                elapsed  = time.time() - _diag_t_loop_start
+                avg_loop = (_diag_total_loop  / _diag_loop_count) * 1000
+                avg_aruco= (_diag_total_aruco / _diag_loop_count) * 1000
+                avg_yolo = (_diag_total_yolo  / _diag_yolo_calls) * 1000 if _diag_yolo_calls else 0
+                fps      = _diag_loop_count / elapsed if elapsed > 0 else 0
+                print(
+                    f"[DIAG foot] fps={fps:.1f}  loop={avg_loop:.1f}ms  "
+                    f"aruco={avg_aruco:.1f}ms  "
+                    f"yolo={avg_yolo:.1f}ms/call × {_diag_yolo_calls // max(_diag_loop_count,1)} calls/frame  "
+                    f"(markers tracked={len(stored_rvecs)})"
+                )
+                # reset accumulators
+                _diag_loop_count = _diag_yolo_calls = 0
+                _diag_total_loop = _diag_total_yolo = _diag_total_aruco = 0.0
+                _diag_t_loop_start = time.time()
+            # ── END DIAG ──────────────────────────────────────────────────
+
             # ── Live debug window (full frame) ────────────────────────────
-            # cv2.imshow("Foot Detection – Full Frame", color_image)
+            cv2.imshow("Foot Detection – Full Frame", color_image)
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break

@@ -153,27 +153,28 @@ class CreateShape:
             # self.create_cone(mesh, cop, radius=0, height=0, segments=0, scoop_radius=0.03, phi_segments=10, theta_segments=20,color_key=color_key)
 
     
-    def update_all_cops(self, all_cops ):
-        """Dynamically creates CoPs (green) if not added, then updates their positions."""
-        for i ,cop_weight in  enumerate(all_cops):
+    def update_all_cops(self, all_cops):
+        """Update one mesh per board. Always renders all boards; hides stale slots."""
+        n = len(all_cops)
+
+        # Update / create a mesh for each current board
+        for i, (cop, weight) in enumerate(all_cops):
             if i not in self.mesh_items:
-                self.mesh_items[i] = gl.GLMeshItem()  # Create mesh only once
-                self.view.addItem(self.mesh_items[i])  # Add to view only once
-            cop,weight=cop_weight
-            self.update_cop(self.mesh_items[i], cop.flatten(), weight , is_gcop=False)  # Update existing mesh
+                self.mesh_items[i] = gl.GLMeshItem()
+                self.view.addItem(self.mesh_items[i])
+            self.create_circle_mesh(self.mesh_items[i], cop.flatten(),
+                                    radius=0.025, segments=36, color_key='cop')
+
+        # Hide any mesh slots that no longer have a board
+        for i in list(self.mesh_items.keys()):
+            if i >= n:
+                self.create_circle_mesh(self.mesh_items[i], np.array([0, 0, 0]),
+                                        radius=0, segments=0, color_key='cop')
     
     
 
-    def gcop_update(self, mesh, gcop1,weight ):
-        gcop_weight =  weight
-        
-        if gcop1 is not None and gcop_weight>15 :
-            # self.create_cone(mesh,gcop1 , radius=0.001, height=0.003, segments=20,
-                            #  scoop_radius=0.025, phi_segments=20, theta_segments=30, color_key='gcop')
-            
-            self.create_circle_mesh(mesh,gcop1,radius=0.02,segments=36 ,color_key='gcop')
+    def gcop_update(self, mesh, gcop1, weight):
+        if gcop1 is not None:
+            self.create_circle_mesh(mesh, gcop1, radius=0.02, segments=36, color_key='gcop')
         else:
-            # self.create_cone(mesh,gcop1 , radius=0, height=0, segments=0, scoop_radius=0.03,
-                            #  phi_segments=10, theta_segments=20, color_key='gcop')
-            
-            self.create_circle_mesh(mesh,gcop1,radius=0 ,segments=0 ,color_key='gcop')
+            self.create_circle_mesh(mesh, gcop1, radius=0, segments=0, color_key='gcop')
