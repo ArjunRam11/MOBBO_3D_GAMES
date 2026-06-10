@@ -70,6 +70,9 @@ FootGeometryfile    = 'normalized_projected_vectors.pickle'
 FootGeometryPath    = os.path.join(_foot_geometry_path, "FootModelMocapData")
 foot_normalized_projected_vectors = read_pickle(FootGeometryPath, FootGeometryfile)
 
+RIGID_BODY_REF_FILE = 'rigid_body_vectors_new.pkl'
+RIGID_BODY_REF_PATH = fr'E:\OpenCV_mobbo_works\BaseOfSupport\notebooks\BOS_validation\FootModelMocapData'
+
 
 # ════════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION
@@ -226,6 +229,29 @@ def return_BOS_vectors_4(tvec_var, rvec_var, tvec_ref, rvec_ref, *input_vectors)
     return out
 
 
+def recover_rigid_transform(P: np.ndarray, Q: np.ndarray):
+    """
+    Recover rotation R and translation t such that Q ≈ R @ P + t.
+
+    P : (N, D) reference points
+    Q : (N, D) detected  points
+    Returns R (D×D rotation matrix) and t (D,) translation vector.
+    """
+    assert P.shape == Q.shape, "Point sets must have the same shape"
+    centroid_P = P.mean(axis=0)
+    centroid_Q = Q.mean(axis=0)
+    P_c = P - centroid_P
+    Q_c = Q - centroid_Q
+    H   = P_c.T @ Q_c
+    U, S, Vt = np.linalg.svd(H)
+    R = Vt.T @ U.T
+    if np.linalg.det(R) < 0:
+        Vt[-1, :] *= -1
+        R = Vt.T @ U.T
+    t = centroid_Q - R @ centroid_P
+    return R, t
+
+
 def ReconstructFootFromNormalizedVectors(normalized_vecs, key1, key2, key3,
                                          foot_length, forefoot_width):
     def _flat2(v):
@@ -360,6 +386,32 @@ class BOSEstimator:
         self.foot_detection_model = foot_detector()
         self.recorder             = FootDataRecorder()
         self.coord_transformer    = CoordinateTransformer()
+
+        # Load rigid-body reference keypoints for foot alignment (optional)
+        self._rigid_ref = None
+        try:
+            import pickle as _pkl
+            _rbd_path = os.path.join(RIGID_BODY_REF_PATH, RIGID_BODY_REF_FILE)
+            with open(_rbd_path, 'rb') as _f:
+                _rbd = _pkl.load(_f)
+            # Right foot reference — 2D XY only (meta1=big_toe, meta3=mid, meta5=pinky, navicular=heel)
+            r_ref = np.array([
+                _rbd['r_meta1'][:2],
+                _rbd['r_meta3'][:2],
+                _rbd['r_meta5'][:2],
+                _rbd['r_navicular'][:2],
+            ], dtype=np.float64)  # (4, 2)
+            # Left foot reference — mirror X to match the right-foot coordinate convention
+            l_ref = np.array([
+                [-_rbd['l_meta1'][0],     _rbd['l_meta1'][1]],
+                [-_rbd['l_meta3'][0],     _rbd['l_meta3'][1]],
+                [-_rbd['l_meta5'][0],     _rbd['l_meta5'][1]],
+                [-_rbd['l_navicular'][0], _rbd['l_navicular'][1]],
+            ], dtype=np.float64)  # (4, 2)
+            self._rigid_ref = {'right': r_ref, 'left': l_ref}
+            logger.info("✅ Rigid-body reference keypoints loaded for foot alignment")
+        except Exception as _e:
+            logger.warning(f"Rigid-body reference not loaded — foot alignment disabled: {_e}")
         self.thread_manager       = ThreadManager()
 
         self.board_data               = BoardData()
@@ -411,8 +463,11 @@ class BOSEstimator:
         self._pending_patient_id  = None
         self._current_patient_id  = None
         self._active_game_cop_path = None   # tracks active game recording path
+        self._bos_before_game      = None
 
         self.bos_enabled = True  # BOS toggle: when False, skip foot/pose computation
+        self.foot_process_enabled = True
+        self._foot_frame_source = None
 
         logger.info("BOSEstimator initialised (4-point foot model)")
 
@@ -479,6 +534,32 @@ class BOSEstimator:
     # Recording control (called from Godot game commands)
     # ─────────────────────────────────────────────────────────────────────────
 
+    def set_bos_enabled(self, enabled: bool, reason: str = ""):
+        """
+        Enable/disable BOS + foot processing without stopping CoP/game control.
+        This is intentionally separate from stop_all_threads().
+        """
+        enabled = bool(enabled)
+        if self.bos_enabled == enabled and self.foot_process_enabled == enabled:
+            return
+
+        self.bos_enabled = enabled
+        self.foot_process_enabled = enabled
+
+        if enabled:
+            if self._foot_frame_source is not None:
+                self.foot_detection_model.start_detection(self._foot_frame_source)
+            print(f"🦶 Foot/BOS processing ENABLED{f' ({reason})' if reason else ''}")
+        else:
+            self.foot_detection_model.foot_prediction_stopthread()
+            self.left_foot_polygon_point = None
+            self.right_foot_polygon_point = None
+            self.foot_numpy_points = [None, None]
+            self.foot_scatter_points = [None, None]
+            self.mobbo.set_foot_points(None, None)
+            self.godot_bridge.update_BoS_points(None, None)
+            print(f"🦶 Foot/BOS processing DISABLED{f' ({reason})' if reason else ''}")
+
     def _start_recording_from_godot(self, game_name: str = "UnknownGame"):
         """
         Start recording triggered by a Godot game event.
@@ -492,6 +573,8 @@ class BOSEstimator:
             cop_path = self._data_logging.start_game_recording(game_name=game_name)
             if cop_path:
                 self._active_game_cop_path = cop_path
+                self._bos_before_game = self.bos_enabled
+                self.set_bos_enabled(False, reason="game recording")
                 print(f"▶️  Game recording STARTED by Godot: {cop_path}")
                 send_ack_to_godot({
                     "type": "recording_ack",
@@ -511,6 +594,9 @@ class BOSEstimator:
             cop_path = getattr(self, '_active_game_cop_path', None)
             self._data_logging.stop_game_recording(cop_path)
             self._active_game_cop_path = None
+            restore_bos = True if self._bos_before_game is None else self._bos_before_game
+            self._bos_before_game = None
+            self.set_bos_enabled(restore_bos, reason="game recording stopped")
             print("⏹️  Game recording STOPPED by Godot command")
             send_ack_to_godot({
                 "type": "recording_ack",
@@ -976,12 +1062,15 @@ class BOSEstimator:
 
                 if len(addr_keys) >= 1:
                     self.all_cops = []
+                    board_weights_by_id = {}
                     ref_ip = str(self.reference_board_ip).strip().lower()
 
                     # ── Pass 1: reference board first (always index 0) ────────
                     for addr in addr_keys:
                         if str(addr[0]).strip().lower() == ref_ip:
                             copx, copy, w = self.mobbo.cop_data[addr]
+                            if self.reference_board_id is not None:
+                                board_weights_by_id[int(self.reference_board_id)] = w
                             cop_transformed = self.coord_transformer.local_cop_to_board_frame(copx, copy)
                             self.all_cops.append((cop_transformed, w))
                             break
@@ -996,10 +1085,14 @@ class BOSEstimator:
                                 (k for k, v in self.board_ip.items()
                                  if str(v).strip().lower() == board_ip), None
                             )
+                            if board_id_get is not None:
+                                board_weights_by_id[int(board_id_get)] = w
                             if board_id_get is not None and board_id_get in self.relative_rotations:
                                 cop_transformed  = np.matmul(self.relative_rotations[board_id_get], cop_transformed)
                                 cop_transformed += self.relative_translations[board_id_get]
                             self.all_cops.append((cop_transformed, w))
+
+                    # self.foot_detection_model.update_active_boards(board_weights_by_id)
 
                     # ── Filter: only boards with weight > 2 kg ────────────────
                     active_cops = [(cv, cw) for cv, cw in self.all_cops if cw > 2]
@@ -1275,6 +1368,20 @@ class BOSEstimator:
                                     r_big_3d, r_mid_3d, r_pinky_safe, r_heel_3d
                                 )
                                 right_big_ref, right_mid_ref, right_pinky_ref, right_heel_ref = r_refs
+                                # ── Rigid-body alignment: warp reference shape to detected keypoints ──
+                                if self._rigid_ref is not None:
+                                    r_c_vec = np.array([
+                                        right_big_ref.flatten()[:2],
+                                        right_mid_ref.flatten()[:2],
+                                        right_pinky_ref.flatten()[:2],
+                                        right_heel_ref.flatten()[:2],
+                                    ])  # (4, 2) detected in board XY
+                                    R_r, t_r = recover_rigid_transform(self._rigid_ref['right'], r_c_vec)
+                                    r_aligned = (R_r @ self._rigid_ref['right'].T).T + t_r  # (4, 2)
+                                    right_big_ref   = np.array([[r_aligned[0, 0], r_aligned[0, 1], 0.0]])
+                                    right_mid_ref   = np.array([[r_aligned[1, 0], r_aligned[1, 1], 0.0]])
+                                    right_pinky_ref = np.array([[r_aligned[2, 0], r_aligned[2, 1], 0.0]])
+                                    right_heel_ref  = np.array([[r_aligned[3, 0], r_aligned[3, 1], 0.0]])
                             except Exception as e:
                                 logger.warning(f"Right BOS transform failed: {e}")
 
@@ -1291,6 +1398,23 @@ class BOSEstimator:
                                     l_big_3d, l_mid_3d, l_pinky_safe, l_heel_3d
                                 )
                                 left_big_ref, left_mid_ref, left_pinky_ref, left_heel_ref = l_refs
+                                # ── Rigid-body alignment: mirror X → align → un-mirror X ──────────
+                                if self._rigid_ref is not None:
+                                    def _mx(v):
+                                        f = np.asarray(v, dtype=np.float64).flatten()
+                                        return np.array([-f[0], f[1]])
+                                    l_c_vec = np.array([
+                                        _mx(left_big_ref),
+                                        _mx(left_mid_ref),
+                                        _mx(left_pinky_ref),
+                                        _mx(left_heel_ref),
+                                    ])  # (4, 2) mirrored detected in board XY
+                                    R_l, t_l = recover_rigid_transform(self._rigid_ref['left'], l_c_vec)
+                                    l_aligned = (R_l @ self._rigid_ref['left'].T).T + t_l  # (4, 2) mirrored
+                                    left_big_ref   = np.array([[-l_aligned[0, 0], l_aligned[0, 1], 0.0]])
+                                    left_mid_ref   = np.array([[-l_aligned[1, 0], l_aligned[1, 1], 0.0]])
+                                    left_pinky_ref = np.array([[-l_aligned[2, 0], l_aligned[2, 1], 0.0]])
+                                    left_heel_ref  = np.array([[-l_aligned[3, 0], l_aligned[3, 1], 0.0]])
                             except Exception as e:
                                 logger.warning(f"Left BOS transform failed: {e}")
 

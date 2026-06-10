@@ -51,21 +51,34 @@ class foot_detector():
         self.keypoints = None
         self.depth     = None
         self.image     = None   # ← always holds the LATEST annotated frame
+        self.thread    = None
+        self.show_debug_window = False
 
     # ── Public API ────────────────────────────────────────────────────────────
 
+    def is_detection_running(self):
+        return self.thread is not None and self.thread.is_alive()
+
     def start_detection(self, frame2):
         global foot_thread_flag
+        if self.is_detection_running():
+            return
         foot_thread_flag = True
         self.thread = threading.Thread(
             target=self.detect_foot,
-            args=(1280, 720, MAT, DIST, self.target_ids, frame2)
+            args=(1280, 720, MAT, DIST, self.target_ids, frame2),
+            daemon=True
         )
         self.thread.start()
 
     def foot_prediction_stopthread(self):
         global foot_thread_flag
         foot_thread_flag = False
+        current = threading.current_thread()
+        if self.thread is not None and self.thread.is_alive() and self.thread is not current:
+            self.thread.join(timeout=1.0)
+        self.keypoints = None
+        self.depth = None
 
     def get_keypoints(self):
         """Returns (keypoints_dict, depth_frame, annotated_color_image)."""
@@ -340,11 +353,12 @@ class foot_detector():
                 avg_aruco= (_diag_total_aruco / _diag_loop_count) * 1000
                 avg_yolo = (_diag_total_yolo  / _diag_yolo_calls) * 1000 if _diag_yolo_calls else 0
                 fps      = _diag_loop_count / elapsed if elapsed > 0 else 0
+                calls_per_frame = _diag_yolo_calls / max(_diag_loop_count, 1)
                 print(
                     f"[DIAG foot] fps={fps:.1f}  loop={avg_loop:.1f}ms  "
                     f"aruco={avg_aruco:.1f}ms  "
-                    f"yolo={avg_yolo:.1f}ms/call × {_diag_yolo_calls // max(_diag_loop_count,1)} calls/frame  "
-                    f"(markers tracked={len(stored_rvecs)})"
+                    f"yolo={avg_yolo:.1f}ms/call × {calls_per_frame:.2f} calls/frame  "
+                    f"(markers tracked={len(stored_rvecs)} crops={len(crops)})"
                 )
                 # reset accumulators
                 _diag_loop_count = _diag_yolo_calls = 0
@@ -353,10 +367,11 @@ class foot_detector():
             # ── END DIAG ──────────────────────────────────────────────────
 
             # ── Live debug window (full frame) ────────────────────────────
-            cv2.imshow("Foot Detection – Full Frame", color_image)
+            if self.show_debug_window:
+                cv2.imshow("Foot Detection – Full Frame", color_image)
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
 
         foot_thread_flag = False
         cv2.destroyAllWindows()
